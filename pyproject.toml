@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: MIT
+
+# keep loosely in sync with
+# https://raw.githubusercontent.com/systemd/mkosi/refs/heads/main/pyproject.toml
+
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "barrage"
+authors = [
+    {name = "Daan De Meyer", email = "daan@amutable.com"},
+    {name = "Michael Vogt", email = "michael@amutable.com"},
+]
+version = "0"
+description = "Run python tests concurrently"
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.12"
+
+[project.scripts]
+mkosi = "barrage.__main__:main"
+
+[tool.setuptools]
+packages = [
+    "barrage",
+]
+
+[tool.isort]
+profile = "black"
+include_trailing_comma = true
+multi_line_output = 3
+py_version = "312"
+
+[tool.mypy]
+python_version = 3.12
+# belonging to --strict
+warn_unused_configs = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_untyped_decorators = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+warn_return_any = true
+no_implicit_reexport = true
+# extra options not in --strict
+pretty = true
+show_error_codes = true
+show_column_numbers = true
+warn_unreachable = true
+strict_equality = true
+scripts_are_modules = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 109
+lint.select = [
+    "E",    # pycodestyle
+    "W",    # pycodestyle (trailing whitespace)
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pypgrade
+    "B"     # flake8-bugbear
+]
+
+[tool.ty.rules]
+unused-type-ignore-comment = "ignore"

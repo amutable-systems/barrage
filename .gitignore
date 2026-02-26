@@ -1,0 +1,6 @@
+mkosi.local/
+mkosi.local.conf
+mkosi.tools/
+mkosi.tools.manifest
+.mkosi-private
+__pycache__/

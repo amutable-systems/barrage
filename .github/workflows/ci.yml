@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      # git ls-remote https://github.com/actions/checkout v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      # follows systemd CI hash
+      - uses: systemd/mkosi@66d51024b7149f40be4702e84275c936373ace97
+
+      - name: Configure mkosi box
+        run: |
+          tee mkosi.local.conf <<EOF
+          [Build]
+          ToolsTreeDistribution=fedora
+          EOF
+
+      - name: Create mkosi box
+        run: mkosi -f box -- true
+
+      - name: Check code quality
+        run: mkosi box -- just check
+
+      - name: Run tests
+        run: mkosi box -- just test
