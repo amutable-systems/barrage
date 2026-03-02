@@ -29,6 +29,15 @@ from barrage.case import AsyncTestCase, MonitoredTestCase
 from barrage.discovery import discover, discover_module, resolve_tests
 from barrage.result import AsyncTestResult, Outcome, TestOutcome
 from barrage.runner import AsyncTestRunner, AsyncTestSuite
+from barrage.subprocess import (
+    DEVNULL,
+    PIPE,
+    STDOUT,
+    CalledProcessError,
+    CompletedProcess,
+    run,
+    spawn,
+)
 from barrage.taskgroups import TaskGroup
 
 __all__ = [
@@ -46,6 +55,14 @@ __all__ = [
     "discover",
     "discover_module",
     "resolve_tests",
+    # Subprocess
+    "spawn",
+    "run",
+    "CompletedProcess",
+    "CalledProcessError",
+    "DEVNULL",
+    "PIPE",
+    "STDOUT",
     # Skip helpers
     "SkipTest",
     # TaskGroup

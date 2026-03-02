@@ -156,3 +156,59 @@ class VMTests(MonitoredTestCase):
         result = await self.vm.run("echo hello")
         assert result == "hello\n"
 ```
+
+## Subprocess helpers
+
+The `barrage.subprocess` module provides `spawn` and `run` for
+launching subprocesses whose output is automatically captured by
+barrage's per-test output capture.
+
+When stdout/stderr are left as `None` (the default), output is
+relayed through a PTY (preserving colours and line-buffering) when
+the real standard stream is a TTY, or through a plain pipe otherwise.
+
+```python
+from barrage.subprocess import spawn, run, PIPE, DEVNULL
+
+# Run a command to completion
+result = await run(["ls", "-la"])
+
+# Capture stdout
+result = await run(["echo", "hello"], stdout=PIPE)
+
+# Long-lived process with guaranteed cleanup
+async with spawn(["my-server", "--port", "8080"]) as proc:
+    ...  # interact with the server
+# proc is killed & cleaned up here
+```
+
+Both functions raise `subprocess.CalledProcessError` on non-zero
+exit codes by default (pass `check=False` to disable).
+
+### Monitored subprocesses
+
+Combine `spawn()` with `MonitoredTestCase.monitor_async_context()` to
+run a long-lived subprocess that is monitored for the lifetime of a
+test class. If the process exits unexpectedly, all running tests in
+the class are cancelled and remaining tests are skipped.
+
+```python
+from barrage import MonitoredTestCase
+from barrage.subprocess import spawn
+
+class ServerTests(MonitoredTestCase):
+    @classmethod
+    async def setUpClass(cls) -> None:
+        await super().setUpClass()
+        cls.server, _ = await cls.monitor_async_context(
+            spawn(["my-server", "--port", "8080"])
+        )
+
+    async def test_health(self) -> None:
+        ...  # talk to self.server
+```
+
+Because `spawn()` is an async context manager, `monitor_async_context()`
+enters it in a background task and monitors that task. The subprocess is
+killed and cleaned up when the test class finishes or when the background
+task is cancelled due to a crash.
