@@ -212,3 +212,70 @@ Because `spawn()` is an async context manager, `monitor_async_context()`
 enters it in a background task and monitors that task. The subprocess is
 killed and cleaned up when the test class finishes or when the background
 task is cancelled due to a crash.
+
+## Singletons
+
+A *singleton* is a resource that is expensive to create and tear down
+(e.g. a pool of virtual machines, a database connection pool) and
+should be shared across many test classes.
+
+Singletons are declared as classes that inherit from `Singleton` and
+implement the async context manager protocol. They are attached to
+test classes using the `singleton` descriptor. The framework creates
+each singleton once, injects it before `setUpClass`, and tears
+everything down in reverse order when the test session ends.
+
+```python
+from typing import Self
+
+from barrage import AsyncTestCase, Singleton, singleton
+
+class VMManager(Singleton):
+    async def __aenter__(self) -> Self:
+        self.pool = await create_vm_pool()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.pool.shutdown()
+
+class MyTests(AsyncTestCase):
+    manager = singleton(VMManager)
+
+    async def test_something(self) -> None:
+        vm = await self.manager.acquire()
+        result = await vm.run("uname -r")
+        self.assertIn("6.", result)
+```
+
+### Default `__aexit__` behaviour
+
+The base `Singleton` class provides a default `__aexit__` that blocks
+forever (via an unresolved `asyncio.Future`), keeping the singleton's
+background task alive until the framework cancels it during teardown.
+Override `__aexit__` when you need custom cleanup logic.
+
+### Dependency injection
+
+Dependencies between singletons are declared using the same
+`singleton` descriptor. If singleton A has a `singleton(B)` descriptor,
+B is created and injected first. Circular dependencies are detected
+and raise `RuntimeError`.
+
+```python
+class ResourceMonitor(Singleton):
+    async def __aenter__(self) -> Self:
+        ...
+
+class VMManager(Singleton):
+    monitor = singleton(ResourceMonitor)
+
+    async def __aenter__(self) -> Self:
+        ...
+
+class MyTests(AsyncTestCase):
+    monitor = singleton(ResourceMonitor)
+    manager = singleton(VMManager)  # ResourceMonitor is created first
+```
+
+Multiple test classes that reference the same singleton class share a
+single instance.

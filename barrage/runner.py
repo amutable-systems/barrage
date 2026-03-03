@@ -22,6 +22,7 @@ from barrage.colorize import (
     style,
 )
 from barrage.result import AsyncTestResult, Outcome, TestOutcome
+from barrage.singleton import SingletonManager, discover_singletons
 
 
 def _collect_test_methods(cls: type[AsyncTestCase]) -> list[str]:
@@ -1035,6 +1036,9 @@ class AsyncTestRunner:
         result = AsyncTestResult()
         entries = suite.entries
 
+        # ── singleton injection ───────────────────────────────────────
+        has_singletons = any(discover_singletons(cls) for cls, _methods in entries)
+
         # Create a stop event when failfast is enabled.  It is shared
         # across all test tasks so that a failure anywhere signals the
         # rest to stop.
@@ -1117,10 +1121,16 @@ class AsyncTestRunner:
 
         result.start_time = time.monotonic()
 
-        try:
-            if progress is not None:
-                await progress.start()
+        async def run_tests() -> None:
+            """Run all test classes, with optional singleton injection."""
+            if has_singletons:
+                async with SingletonManager() as sm:
+                    await sm.inject(entries)
+                    await _run_all_classes()
+            else:
+                await _run_all_classes()
 
+        async def _run_all_classes() -> None:
             if self.interactive:
                 # In interactive mode run classes sequentially so that
                 # their output is not interleaved.
@@ -1159,6 +1169,11 @@ class AsyncTestRunner:
                     for cls, methods in entries
                 ]
                 await asyncio.gather(*class_tasks)
+
+        try:
+            if progress is not None:
+                await progress.start()
+            await run_tests()
         finally:
             if progress is not None:
                 await progress.stop()
@@ -1170,6 +1185,7 @@ class AsyncTestRunner:
                 devnull.close()
 
         result.end_time = time.monotonic()
+
         return result
 
     def run_classes(self, *classes: type[AsyncTestCase]) -> AsyncTestResult:

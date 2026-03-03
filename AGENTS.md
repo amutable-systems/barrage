@@ -20,7 +20,7 @@ Barrage is a concurrent async test framework for Python 3.12+ with zero external
 
 - **`runner.py`** — Execution engine. Runs test classes concurrently as asyncio tasks. Uses `contextvars.ContextVar` for per-task stdout/stderr capture so concurrent tests get isolated output.
 - **`case.py`** — `AsyncTestCase` (base class, all hooks/tests are async) and `MonitoredTestCase` (adds background task crash monitoring with auto-cancel/skip).
-- **`singleton.py`** — Singleton lifecycle with dependency injection. `Singleton` base class (async context manager), `singleton[T]` descriptor for declaring dependencies on test classes, `SingletonManager` resolves dependencies from `__init__` type annotations and tears down in reverse creation order.
+- **`singleton.py`** — Singleton lifecycle with dependency injection. `Singleton` base class (async context manager), `singleton[T]` descriptor for declaring dependencies on both test classes and singleton classes, `SingletonManager` resolves dependencies recursively and tears down in reverse creation order.
 - **`discovery.py`** — Test discovery. Supports directories, files, and `File::Class::method` selectors.
 - **`result.py`** — `TestOutcome` dataclass and `AsyncTestResult` collector (asyncio.Lock-protected).
 - **`subprocess.py`** — Async `spawn()` (context manager for long-lived processes) and `run()` helpers with PTY-aware output relaying through the capture system.

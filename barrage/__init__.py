@@ -8,9 +8,22 @@ within the same class run concurrently is configurable on a per-class
 basis via ``__init_subclass__``, and the overall level of concurrency
 is tuneable via the runner.
 
+Singletons (expensive resources shared across test classes) are
+supported via the :class:`singleton` descriptor and
+:class:`SingletonManager`::
+
+    from barrage import AsyncTestCase, singleton
+
+    class MyTests(AsyncTestCase):
+        manager = singleton(VMManager)
+
+        async def test_example(self) -> None:
+            vm = await self.manager.acquire()
+            self.assertIsNotNone(vm)
+
 Quick start::
 
-    from barrage import AsyncTestCase, AsyncTestRunner
+    from barrage import AsyncTestRunner, AsyncTestCase
 
     class MyTests(AsyncTestCase):
         async def setUp(self) -> None:
@@ -29,6 +42,7 @@ from barrage.case import AsyncTestCase, MonitoredTestCase
 from barrage.discovery import discover, discover_module, resolve_tests
 from barrage.result import AsyncTestResult, Outcome, TestOutcome
 from barrage.runner import AsyncTestRunner, AsyncTestSuite
+from barrage.singleton import Singleton, SingletonManager, singleton
 from barrage.subprocess import (
     DEVNULL,
     PIPE,
@@ -44,6 +58,10 @@ __all__ = [
     # Core
     "AsyncTestCase",
     "MonitoredTestCase",
+    # Singletons
+    "Singleton",
+    "singleton",
+    "SingletonManager",
     # Runner
     "AsyncTestRunner",
     "AsyncTestSuite",

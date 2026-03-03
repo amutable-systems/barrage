@@ -1,0 +1,1293 @@
+# SPDX-License-Identifier: MIT
+
+"""
+Tests for singleton support.
+
+Run with::
+
+    python3 -m barrage tests/test_singleton.py
+"""
+
+import asyncio
+from typing import ClassVar, Self
+
+from barrage.case import AsyncTestCase
+from barrage.result import AsyncTestResult
+from barrage.runner import AsyncTestRunner, AsyncTestSuite
+from barrage.singleton import (
+    Singleton,
+    SingletonManager,
+    discover_singletons,
+    discover_singletons_from_suite,
+    singleton,
+    singleton_key,
+)
+
+# ===================================================================== #
+#  Helpers
+# ===================================================================== #
+
+
+async def _run(
+    *classes: type[AsyncTestCase],
+    max_concurrency: int | None = None,
+    failfast: bool = False,
+) -> AsyncTestResult:
+    """Run one or more inner test classes and return the result."""
+    runner = AsyncTestRunner(
+        max_concurrency=max_concurrency,
+        verbosity=0,
+        failfast=failfast,
+    )
+    return await runner.run_classes_async(*classes)
+
+
+async def _run_suite(
+    suite: AsyncTestSuite,
+) -> AsyncTestResult:
+    runner = AsyncTestRunner(
+        verbosity=0,
+    )
+    return await runner.run_suite_async(suite)
+
+
+# ── Sample singletons ───────────────────────────────────────────────
+
+
+class Counter(Singleton):
+    """A simple singleton that tracks creation/teardown."""
+
+    instances_created: ClassVar[int] = 0
+    instances_torn_down: ClassVar[int] = 0
+
+    def __init__(self) -> None:
+        Counter.instances_created += 1
+        self.value = 0
+        self.torn_down = False
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        try:
+            await asyncio.Future()
+        finally:
+            self.torn_down = True
+            Counter.instances_torn_down += 1
+
+    def increment(self) -> None:
+        self.value += 1
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.instances_created = 0
+        cls.instances_torn_down = 0
+
+
+class Greeter(Singleton):
+    def __init__(self) -> None:
+        self.greeting = "Hello"
+
+    def greet(self, name: str) -> str:
+        return f"{self.greeting}, {name}!"
+
+
+class AsyncGreeter(Singleton):
+    """A singleton that does async work during setup/teardown."""
+
+    def __init__(self) -> None:
+        self.greeting = "Async Hello"
+
+    async def __aenter__(self) -> Self:
+        await asyncio.sleep(0)
+        return self
+
+    def greet(self, name: str) -> str:
+        return f"{self.greeting}, {name}!"
+
+
+# ===================================================================== #
+#  Descriptor tests
+# ===================================================================== #
+
+
+class TestSingletonDescriptor(AsyncTestCase, concurrent=True):
+    async def test_descriptor_raises_before_injection(self) -> None:
+        """Accessing a singleton before injection raises RuntimeError."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            counter = singleton(Counter)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            _Inner("runTest").counter  # noqa: B018
+
+        self.assertIn("has not been injected", str(ctx.exception))
+        self.assertIn("counter", str(ctx.exception))
+
+    async def test_descriptor_class_access_raises_before_injection(self) -> None:
+        """Class-level access also raises before injection."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            counter = singleton(Counter)
+
+        with self.assertRaises(RuntimeError):
+            _Inner.counter  # noqa: B018
+
+    async def test_descriptor_set_name(self) -> None:
+        """__set_name__ records the attribute name."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            my_counter = singleton(Counter)
+
+        desc = vars(_Inner)["my_counter"]
+        self.assertIsInstance(desc, singleton)
+        self.assertEqual(desc._attr_name, "my_counter")
+
+    async def test_descriptor_repr(self) -> None:
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+        desc = vars(_Inner)["ctr"]
+        r = repr(desc)
+        self.assertIn("singleton", r)
+        self.assertIn("Counter", r)
+        self.assertIn("ctr", r)
+
+    async def test_descriptor_cls_stored(self) -> None:
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+        desc = vars(_Inner)["ctr"]
+        self.assertIs(desc.cls, Counter)
+
+    async def test_descriptor_rejects_non_type(self) -> None:
+        """singleton() raises TypeError if given a non-type."""
+
+        def not_a_class() -> None:
+            pass
+
+        with self.assertRaises(TypeError) as ctx:
+            singleton(not_a_class)  # type: ignore[arg-type,type-var]
+
+        self.assertIn("expects a class", str(ctx.exception))
+
+    async def test_descriptor_rejects_non_singleton(self) -> None:
+        """singleton() raises TypeError if the class doesn't inherit from Singleton."""
+
+        class NotASingleton:
+            pass
+
+        with self.assertRaises(TypeError) as ctx:
+            singleton(NotASingleton)  # type: ignore[type-var]
+
+        self.assertIn("Singleton subclass", str(ctx.exception))
+        self.assertIn("NotASingleton", str(ctx.exception))
+
+
+# ===================================================================== #
+#  Discovery tests
+# ===================================================================== #
+
+
+class TestSingletonDiscovery(AsyncTestCase, concurrent=True):
+    async def test_discover_singletons_on_class(self) -> None:
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+        found = discover_singletons(_Inner)
+        self.assertEqual(set(found.keys()), {"ctr"})
+        self.assertIs(found["ctr"].cls, Counter)
+
+    async def test_discover_multiple_singletons(self) -> None:
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+            greet = singleton(Greeter)
+
+        found = discover_singletons(_Inner)
+        self.assertEqual(set(found.keys()), {"ctr", "greet"})
+
+    async def test_discover_no_singletons(self) -> None:
+        class _Inner(AsyncTestCase):
+            __test__ = False
+
+            async def test_ok(self) -> None:
+                pass
+
+        found = discover_singletons(_Inner)
+        self.assertEqual(len(found), 0)
+
+    async def test_discover_singletons_inherited(self) -> None:
+        """Singletons declared on a base class are discovered on subclasses."""
+
+        class _Base(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+        class _Child(_Base):
+            __test__ = False
+
+        found = discover_singletons(_Child)
+        self.assertEqual(set(found.keys()), {"ctr"})
+
+    async def test_discover_singletons_override_in_subclass(self) -> None:
+        """A subclass can override a singleton with a different class."""
+
+        class _Base(AsyncTestCase):
+            __test__ = False
+            greet = singleton(Greeter)
+
+        class _Child(_Base):
+            __test__ = False
+            greet = singleton(AsyncGreeter)  # type: ignore[assignment]
+
+        found = discover_singletons(_Child)
+        self.assertEqual(set(found.keys()), {"greet"})
+        self.assertIs(found["greet"].cls, AsyncGreeter)
+
+    async def test_discover_singletons_from_suite(self) -> None:
+        class _A(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_a(self) -> None:
+                pass
+
+        class _B(AsyncTestCase):
+            __test__ = False
+            greet = singleton(Greeter)
+
+            async def test_b(self) -> None:
+                pass
+
+        suite = AsyncTestSuite()
+        suite.add_class(_A)
+        suite.add_class(_B)
+
+        found = discover_singletons_from_suite(suite.entries)
+        ctr_key = singleton_key(vars(_A)["ctr"])
+        greet_key = singleton_key(vars(_B)["greet"])
+        self.assertIn(ctr_key, found)
+        self.assertIn(greet_key, found)
+
+    async def test_discover_singletons_from_suite_deduplicates(self) -> None:
+        """Same class used by multiple test classes appears once."""
+
+        class _A(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_a(self) -> None:
+                pass
+
+        class _B(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_b(self) -> None:
+                pass
+
+        suite = AsyncTestSuite()
+        suite.add_class(_A)
+        suite.add_class(_B)
+
+        found = discover_singletons_from_suite(suite.entries)
+        self.assertEqual(len(found), 1)
+
+
+# ===================================================================== #
+#  Singleton key tests
+# ===================================================================== #
+
+
+class TestSingletonKey(AsyncTestCase, concurrent=True):
+    async def test_key_uses_module_and_qualname(self) -> None:
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+        desc = vars(_Inner)["ctr"]
+        key = singleton_key(desc)
+        self.assertIn("Counter", key)
+        self.assertIn(__name__, key)
+
+    async def test_same_class_same_key(self) -> None:
+        class _A(AsyncTestCase):
+            __test__ = False
+            x = singleton(Counter)
+
+        class _B(AsyncTestCase):
+            __test__ = False
+            y = singleton(Counter)
+
+        key_a = singleton_key(vars(_A)["x"])
+        key_b = singleton_key(vars(_B)["y"])
+        self.assertEqual(key_a, key_b)
+
+    async def test_different_class_different_key(self) -> None:
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+            greet = singleton(Greeter)
+
+        key_ctr = singleton_key(vars(_Inner)["ctr"])
+        key_greet = singleton_key(vars(_Inner)["greet"])
+        self.assertNotEqual(key_ctr, key_greet)
+
+
+# ===================================================================== #
+#  SingletonManager tests
+# ===================================================================== #
+
+
+class TestSingletonManager(AsyncTestCase):
+    async def test_get_or_create_enters_context_manager(self) -> None:
+        class _Singleton(Singleton):
+            def __init__(self) -> None:
+                self.torn_down = False
+
+            async def __aexit__(self, *exc: object) -> None:
+                try:
+                    await asyncio.Future()
+                finally:
+                    self.torn_down = True
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            s = singleton(_Singleton)
+
+        desc = vars(_Inner)["s"]
+
+        async with SingletonManager() as sm:
+            value = await sm.get_or_create(desc)
+            self.assertIsInstance(value, _Singleton)
+            self.assertFalse(value.torn_down)
+
+        # After exiting the context manager, teardown should have run
+        self.assertTrue(value.torn_down)
+
+    async def test_get_or_create_returns_cached(self) -> None:
+        """Calling get_or_create twice with the same class returns the same value."""
+        Counter.reset()
+
+        class _A(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+        class _B(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+        desc_a = vars(_A)["ctr"]
+        desc_b = vars(_B)["ctr"]
+
+        async with SingletonManager() as sm:
+            val_a = await sm.get_or_create(desc_a)
+            val_b = await sm.get_or_create(desc_b)
+            self.assertIs(val_a, val_b)
+            self.assertEqual(Counter.instances_created, 1)
+
+    async def test_get_or_create_different_classes(self) -> None:
+        """Different classes create distinct singleton instances."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+            greet = singleton(Greeter)
+
+        desc_ctr = vars(_Inner)["ctr"]
+        desc_greet = vars(_Inner)["greet"]
+
+        async with SingletonManager() as sm:
+            val_ctr = await sm.get_or_create(desc_ctr)
+            val_greet = await sm.get_or_create(desc_greet)
+            self.assertIsInstance(val_ctr, Counter)
+            self.assertIsInstance(val_greet, Greeter)
+
+    async def test_inject_replaces_descriptors(self) -> None:
+        """After inject(), descriptors are replaced with actual values."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_ok(self) -> None:
+                pass
+
+        suite = AsyncTestSuite()
+        suite.add_class(_Inner)
+        entries = suite.entries
+
+        async with SingletonManager() as sm:
+            await sm.inject(entries)
+
+            # Descriptor should be replaced
+            self.assertFalse(isinstance(vars(_Inner).get("ctr"), singleton))
+            self.assertIsInstance(_Inner.ctr, Counter)  # type: ignore[attr-defined]
+
+            # Instance access works
+            instance = _Inner("test_ok")
+            self.assertIsInstance(instance.ctr, Counter)  # type: ignore[attr-defined]
+
+    async def test_inject_multiple_classes_share_singleton(self) -> None:
+        Counter.reset()
+
+        class _A(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_a(self) -> None:
+                pass
+
+        class _B(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_b(self) -> None:
+                pass
+
+        suite = AsyncTestSuite()
+        suite.add_class(_A)
+        suite.add_class(_B)
+
+        async with SingletonManager() as sm:
+            await sm.inject(suite.entries)
+            self.assertIs(_A.ctr, _B.ctr)  # type: ignore[attr-defined]
+            self.assertEqual(Counter.instances_created, 1)
+
+    async def test_teardown_reverse_order(self) -> None:
+        """Singletons are torn down in reverse creation order."""
+        teardown_order: list[str] = []
+
+        class _SingletonA(Singleton):
+            async def __aexit__(self, *exc: object) -> None:
+                try:
+                    await asyncio.Future()
+                finally:
+                    teardown_order.append("a")
+
+        class _SingletonB(Singleton):
+            async def __aexit__(self, *exc: object) -> None:
+                try:
+                    await asyncio.Future()
+                finally:
+                    teardown_order.append("b")
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            a = singleton(_SingletonA)
+            b = singleton(_SingletonB)
+
+        desc_a = vars(_Inner)["a"]
+        desc_b = vars(_Inner)["b"]
+
+        async with SingletonManager() as sm:
+            await sm.get_or_create(desc_a)
+            await sm.get_or_create(desc_b)
+
+        self.assertEqual(teardown_order, ["b", "a"])
+
+    async def test_teardown_continues_on_error(self) -> None:
+        """Even if one singleton's teardown fails, the rest are still torn down."""
+        torn_down: list[str] = []
+
+        class _GoodSingleton(Singleton):
+            async def __aexit__(self, *exc: object) -> None:
+                try:
+                    await asyncio.Future()
+                finally:
+                    torn_down.append("good")
+
+        class _BadSingleton(Singleton):
+            async def __aexit__(self, *exc: object) -> None:
+                try:
+                    await asyncio.Future()
+                finally:
+                    torn_down.append("bad")
+                    raise RuntimeError("teardown failed")
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            good = singleton(_GoodSingleton)
+            bad = singleton(_BadSingleton)
+
+        try:
+            async with SingletonManager() as sm:
+                await sm.get_or_create(vars(_Inner)["good"])
+                await sm.get_or_create(vars(_Inner)["bad"])
+        except BaseException:
+            pass
+
+        self.assertIn("good", torn_down)
+        self.assertIn("bad", torn_down)
+
+    async def test_active_keys(self) -> None:
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+            greet = singleton(Greeter)
+
+        desc_ctr = vars(_Inner)["ctr"]
+        desc_greet = vars(_Inner)["greet"]
+        key_ctr = singleton_key(desc_ctr)
+        key_greet = singleton_key(desc_greet)
+
+        async with SingletonManager() as sm:
+            self.assertEqual(sm.active_keys, frozenset())
+
+            await sm.get_or_create(desc_ctr)
+            self.assertEqual(sm.active_keys, frozenset({key_ctr}))
+
+            await sm.get_or_create(desc_greet)
+            self.assertEqual(sm.active_keys, frozenset({key_ctr, key_greet}))
+
+    async def test_context_manager_protocol(self) -> None:
+        Counter.reset()
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+        desc = vars(_Inner)["ctr"]
+
+        async with SingletonManager() as sm:
+            value = await sm.get_or_create(desc)
+            self.assertFalse(value.torn_down)
+
+        self.assertTrue(value.torn_down)
+
+
+# ===================================================================== #
+#  Dependency resolution tests
+# ===================================================================== #
+
+
+class TestSingletonDependencies(AsyncTestCase):
+    async def test_dependency_resolved_before_dependent(self) -> None:
+        """A singleton's descriptor dependencies are resolved first."""
+        creation_order: list[str] = []
+
+        class _Dep(Singleton):
+            async def __aenter__(self) -> Self:
+                creation_order.append("dep")
+                return self
+
+        class _Main(Singleton):
+            dep = singleton(_Dep)
+
+            async def __aenter__(self) -> Self:
+                creation_order.append("main")
+                return self
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            dep = singleton(_Dep)
+            main = singleton(_Main)
+
+            async def test_ok(self) -> None:
+                self.assertIsInstance(self.main.dep, _Dep)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(creation_order, ["dep", "main"])
+
+    async def test_dependency_chain(self) -> None:
+        """A -> B -> C chain resolves correctly."""
+        creation_order: list[str] = []
+
+        class _C(Singleton):
+            async def __aenter__(self) -> Self:
+                creation_order.append("C")
+                return self
+
+        class _B(Singleton):
+            c = singleton(_C)
+
+            async def __aenter__(self) -> Self:
+                creation_order.append("B")
+                return self
+
+        class _A(Singleton):
+            b = singleton(_B)
+
+            async def __aenter__(self) -> Self:
+                creation_order.append("A")
+                return self
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            a = singleton(_A)
+            b = singleton(_B)
+            c = singleton(_C)
+
+            async def test_chain(self) -> None:
+                self.assertIs(self.a.b, self.b)
+                self.assertIs(self.b.c, self.c)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(creation_order, ["C", "B", "A"])
+
+    async def test_diamond_dependency(self) -> None:
+        """Diamond: A and B both depend on C; C is created once."""
+
+        class _C(Singleton):
+            instances: ClassVar[int] = 0
+
+            def __init__(self) -> None:
+                _C.instances += 1
+
+        class _A(Singleton):
+            c = singleton(_C)
+
+        class _B(Singleton):
+            c = singleton(_C)
+
+        _C.instances = 0
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            a = singleton(_A)
+            b = singleton(_B)
+            c = singleton(_C)
+
+            async def test_shared(self) -> None:
+                self.assertIs(self.a.c, self.b.c)
+                self.assertIs(self.a.c, self.c)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(_C.instances, 1)
+
+    async def test_circular_dependency_detected(self) -> None:
+        """Circular dependency A -> B -> A raises RuntimeError."""
+
+        class _B(Singleton):
+            pass
+
+        class _A(Singleton):
+            b = singleton(_B)
+
+        # Patch _B to create the cycle now that _A exists.
+        _B.a = singleton(_A)  # type: ignore[attr-defined]
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            a = singleton(_A)
+            b = singleton(_B)
+
+            async def test_never(self) -> None:
+                pass
+
+        with self.assertRaises(ExceptionGroup) as ctx:
+            await _run(_Inner)
+
+        assert isinstance(ctx.exception, ExceptionGroup)
+        self.assertEqual(len(ctx.exception.exceptions), 1)
+        self.assertIsInstance(ctx.exception.exceptions[0], RuntimeError)
+        self.assertIn("Circular", str(ctx.exception.exceptions[0]))
+
+    async def test_circular_dependency_three_way(self) -> None:
+        """Three-way cycle A -> B -> C -> A is detected."""
+
+        class _C(Singleton):
+            pass
+
+        class _B(Singleton):
+            c = singleton(_C)
+
+        class _A(Singleton):
+            b = singleton(_B)
+
+        # Patch _C to close the cycle now that _A exists.
+        _C.a = singleton(_A)  # type: ignore[attr-defined]
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            a = singleton(_A)
+            b = singleton(_B)
+            c = singleton(_C)
+
+            async def test_never(self) -> None:
+                pass
+
+        with self.assertRaises(ExceptionGroup) as ctx:
+            await _run(_Inner)
+
+        assert isinstance(ctx.exception, ExceptionGroup)
+        self.assertEqual(len(ctx.exception.exceptions), 1)
+        self.assertIsInstance(ctx.exception.exceptions[0], RuntimeError)
+        self.assertIn("Circular", str(ctx.exception.exceptions[0]))
+
+    async def test_teardown_order_with_dependencies(self) -> None:
+        """Dependents are torn down before their dependencies."""
+        teardown_order: list[str] = []
+
+        class _Dep(Singleton):
+            async def __aexit__(self, *exc: object) -> None:
+                try:
+                    await asyncio.Future()
+                finally:
+                    teardown_order.append("dep")
+
+        class _Main(Singleton):
+            dep = singleton(_Dep)
+
+            async def __aexit__(self, *exc: object) -> None:
+                try:
+                    await asyncio.Future()
+                finally:
+                    teardown_order.append("main")
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            dep = singleton(_Dep)
+            main = singleton(_Main)
+
+            async def test_ok(self) -> None:
+                pass
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        # main depends on dep, so main should be torn down first
+        self.assertEqual(teardown_order, ["main", "dep"])
+
+    async def test_transitive_dependency_not_on_test_class(self) -> None:
+        """A dependency only declared on a singleton (not the test class) is still created."""
+
+        class _Transitive(Singleton):
+            pass
+
+        class _Main(Singleton):
+            t = singleton(_Transitive)
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            main = singleton(_Main)
+
+            async def test_ok(self) -> None:
+                self.assertIsInstance(self.main.t, _Transitive)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+
+# ===================================================================== #
+#  Integration: singletons with the runner
+# ===================================================================== #
+
+
+class TestSingletonIntegration(AsyncTestCase):
+    async def test_basic_singleton_injection(self) -> None:
+        """Tests can access injected singleton instances."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_use_singleton(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                self.ctr.increment()
+                self.assertEqual(self.ctr.value, 1)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 1)
+
+    async def test_singleton_shared_across_tests_in_class(self) -> None:
+        """All test methods in a class see the same singleton instance."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_a(self) -> None:
+                self.ctr.increment()
+
+            async def test_b(self) -> None:
+                self.ctr.increment()
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 2)
+
+    async def test_singleton_shared_across_classes(self) -> None:
+        """Two classes using the same singleton class share the instance."""
+        Counter.reset()
+
+        class _A(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_a(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                self.ctr.increment()
+
+        class _B(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_b(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                self.ctr.increment()
+
+        result = await _run(_A, _B)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 2)
+        # Only one Counter should have been created
+        self.assertEqual(Counter.instances_created, 1)
+
+    async def test_singleton_torn_down_after_run(self) -> None:
+        """Without an external manager, singletons are torn down after the run."""
+        Counter.reset()
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_ok(self) -> None:
+                self.assertFalse(self.ctr.torn_down)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(Counter.instances_torn_down, 1)
+
+    async def test_multiple_singletons_on_one_class(self) -> None:
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+            greet = singleton(Greeter)
+
+            async def test_both(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                self.assertIsInstance(self.greet, Greeter)
+                self.assertEqual(self.greet.greet("World"), "Hello, World!")
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_singleton_with_async_setup_teardown(self) -> None:
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            greet = singleton(AsyncGreeter)
+
+            async def test_use(self) -> None:
+                self.assertEqual(self.greet.greet("Test"), "Async Hello, Test!")
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_singleton_available_in_setup_class(self) -> None:
+        """Singletons are injected before setUpClass runs."""
+        setup_class_saw_singleton = False
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            @classmethod
+            async def setUpClass(cls) -> None:
+                nonlocal setup_class_saw_singleton
+                await super().setUpClass()
+                setup_class_saw_singleton = isinstance(cls.ctr, Counter)  # type: ignore[arg-type]
+
+            async def test_ok(self) -> None:
+                pass
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertTrue(setup_class_saw_singleton)
+
+    async def test_singleton_available_in_setup(self) -> None:
+        """Singletons are available in per-test setUp."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def setUp(self) -> None:
+                await super().setUp()
+                self.ctr.increment()
+
+            async def test_check(self) -> None:
+                self.assertGreaterEqual(self.ctr.value, 1)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_inherited_singleton(self) -> None:
+        """Subclass inherits singleton from base without redeclaring it."""
+
+        class _Base(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+        class _Child(_Base):
+            __test__ = False
+
+            async def test_inherited(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                self.ctr.increment()
+
+        result = await _run(_Child)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 1)
+
+    async def test_no_singletons_runs_normally(self) -> None:
+        """Classes without singletons still work as before."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+
+            async def test_plain(self) -> None:
+                self.assertEqual(1 + 1, 2)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 1)
+
+    async def test_concurrent_tests_with_singleton(self) -> None:
+        """Singleton works with concurrent test execution."""
+
+        class _Inner(AsyncTestCase, concurrent=True):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_a(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                await asyncio.sleep(0.01)
+
+            async def test_b(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                await asyncio.sleep(0.01)
+
+            async def test_c(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                await asyncio.sleep(0.01)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 3)
+
+    async def test_singleton_creation_error_propagates(self) -> None:
+        """If a singleton raises during __aenter__, it propagates."""
+
+        class _Broken(Singleton):
+            async def __aenter__(self) -> Self:
+                raise RuntimeError("boot failed")
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            broken = singleton(_Broken)
+
+            async def test_never(self) -> None:
+                pass
+
+        with self.assertRaises(ExceptionGroup) as ctx:
+            await _run(_Inner)
+
+        assert isinstance(ctx.exception, ExceptionGroup)
+        self.assertEqual(len(ctx.exception.exceptions), 1)
+        self.assertIsInstance(ctx.exception.exceptions[0], RuntimeError)
+        self.assertIn("boot failed", str(ctx.exception.exceptions[0]))
+
+    async def test_mixed_singleton_and_non_singleton_classes(self) -> None:
+        """A suite with both singleton-using and plain classes works."""
+        Counter.reset()
+
+        class _WithSingleton(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_singleton(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+
+        class _Plain(AsyncTestCase):
+            __test__ = False
+
+            async def test_plain(self) -> None:
+                self.assertEqual(2 + 2, 4)
+
+        result = await _run(_WithSingleton, _Plain)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 2)
+        self.assertEqual(Counter.instances_created, 1)
+
+    async def test_failfast_still_tears_down_singletons(self) -> None:
+        """With failfast, singletons are still cleaned up."""
+        Counter.reset()
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_fail(self) -> None:
+                self.fail("intentional failure")
+
+            async def test_ok(self) -> None:
+                pass
+
+        result = await _run(_Inner, failfast=True)
+        self.assertFalse(result.was_successful)
+        # The singleton should still be torn down (no external manager)
+        self.assertEqual(Counter.instances_torn_down, 1)
+
+    async def test_dependent_singleton_integration(self) -> None:
+        """Full integration: dependent singletons work through the runner."""
+
+        class _Monitor(Singleton):
+            def __init__(self) -> None:
+                self.started = False
+
+            async def __aenter__(self) -> Self:
+                self.started = True
+                return self
+
+            async def __aexit__(self, *exc: object) -> None:
+                try:
+                    await asyncio.Future()
+                finally:
+                    self.started = False
+
+        class _Manager(Singleton):
+            monitor = singleton(_Monitor)
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            monitor = singleton(_Monitor)
+            manager = singleton(_Manager)
+
+            async def test_dependency(self) -> None:
+                self.assertIs(self.manager.monitor, self.monitor)
+                self.assertTrue(self.monitor.started)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_dependent_singleton_shared_across_classes(self) -> None:
+        """Dependent singletons are shared across test classes."""
+
+        class _Dep(Singleton):
+            instances: ClassVar[int] = 0
+
+            def __init__(self) -> None:
+                _Dep.instances += 1
+
+        class _Main(Singleton):
+            dep = singleton(_Dep)
+
+        _Dep.instances = 0
+
+        class _A(AsyncTestCase):
+            __test__ = False
+            dep = singleton(_Dep)
+            main = singleton(_Main)
+
+            async def test_a(self) -> None:
+                self.assertIsInstance(self.main.dep, _Dep)
+
+        class _B(AsyncTestCase):
+            __test__ = False
+            dep = singleton(_Dep)
+            main = singleton(_Main)
+
+            async def test_b(self) -> None:
+                self.assertIsInstance(self.main.dep, _Dep)
+
+        result = await _run(_A, _B)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(_Dep.instances, 1)
+
+
+# ===================================================================== #
+#  Singleton inheritance tests
+# ===================================================================== #
+
+
+class TestSingletonInheritance(AsyncTestCase):
+    async def test_child_singleton_adds_dependency(self) -> None:
+        """A child singleton can add its own dependencies via descriptors."""
+        creation_order: list[str] = []
+
+        class _Dep(Singleton):
+            async def __aenter__(self) -> Self:
+                creation_order.append("dep")
+                return self
+
+        class _Base(Singleton):
+            async def __aenter__(self) -> Self:
+                creation_order.append("base")
+                return self
+
+        class _Child(_Base):
+            dep = singleton(_Dep)
+
+            async def __aenter__(self) -> Self:
+                creation_order.append("child")
+                return self
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            dep = singleton(_Dep)
+            child = singleton(_Child)
+
+            async def test_ok(self) -> None:
+                self.assertIsInstance(self.child.dep, _Dep)
+                self.assertIs(self.child.dep, self.dep)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(creation_order, ["dep", "child"])
+
+    async def test_child_singleton_inherits_dependency(self) -> None:
+        """A child singleton inherits dependencies declared on the parent."""
+        creation_order: list[str] = []
+
+        class _Dep(Singleton):
+            async def __aenter__(self) -> Self:
+                creation_order.append("dep")
+                return self
+
+        class _Base(Singleton):
+            dep = singleton(_Dep)
+
+            async def __aenter__(self) -> Self:
+                creation_order.append("base")
+                return self
+
+        class _Child(_Base):
+            async def __aenter__(self) -> Self:
+                creation_order.append("child")
+                return self
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            dep = singleton(_Dep)
+            child = singleton(_Child)
+
+            async def test_ok(self) -> None:
+                self.assertIsInstance(self.child.dep, _Dep)
+                self.assertIs(self.child.dep, self.dep)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(creation_order, ["dep", "child"])
+
+    async def test_child_singleton_overrides_dependency(self) -> None:
+        """A child can override a parent's dependency with a different class."""
+
+        class _DepA(Singleton):
+            pass
+
+        class _DepB(Singleton):
+            pass
+
+        class _Base(Singleton):
+            dep = singleton(_DepA)
+
+        class _Child(_Base):
+            dep = singleton(_DepB)  # type: ignore[assignment]
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            b = singleton(_DepB)
+            child = singleton(_Child)
+
+            async def test_ok(self) -> None:
+                self.assertIsInstance(self.child.dep, _DepB)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_child_singleton_no_init(self) -> None:
+        """A singleton hierarchy where neither parent nor child has dependencies."""
+
+        class _Base(Singleton):
+            async def __aenter__(self) -> Self:
+                return self
+
+        class _Child(_Base):
+            async def __aenter__(self) -> Self:
+                return self
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            child = singleton(_Child)
+
+            async def test_ok(self) -> None:
+                self.assertIsInstance(self.child, _Child)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+
+# ===================================================================== #
+#  Singleton crash propagation tests
+# ===================================================================== #
+
+
+class TestSingletonCrashPropagation(AsyncTestCase):
+    async def test_singleton_background_crash_propagates(self) -> None:
+        """A singleton whose background work crashes surfaces the error."""
+
+        class _CrashingSingleton(Singleton):
+            async def __aexit__(self, *exc: object) -> None:
+                # Simulate background work that crashes after setup.
+                raise RuntimeError("background crash")
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            s = singleton(_CrashingSingleton)
+
+        desc = vars(_Inner)["s"]
+
+        with self.assertRaises(BaseException) as ctx:
+            async with SingletonManager() as sm:
+                await sm.get_or_create(desc)
+
+        # The TaskGroup wraps the error in an ExceptionGroup.
+        assert isinstance(ctx.exception, ExceptionGroup)
+        self.assertEqual(len(ctx.exception.exceptions), 1)
+        self.assertIsInstance(ctx.exception.exceptions[0], RuntimeError)
+        self.assertIn("background crash", str(ctx.exception.exceptions[0]))
+
+    async def test_singleton_background_crash_cancels_siblings(self) -> None:
+        """When one singleton crashes, other singletons are torn down."""
+        torn_down = False
+
+        class _GoodSingleton(Singleton):
+            async def __aexit__(self, *exc: object) -> None:
+                nonlocal torn_down
+                try:
+                    await asyncio.Future()
+                finally:
+                    torn_down = True
+
+        class _CrashingSingleton(Singleton):
+            async def __aexit__(self, *exc: object) -> None:
+                raise RuntimeError("crash")
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            good = singleton(_GoodSingleton)
+            crash = singleton(_CrashingSingleton)
+
+        desc_good = vars(_Inner)["good"]
+        desc_crash = vars(_Inner)["crash"]
+
+        try:
+            async with SingletonManager() as sm:
+                await sm.get_or_create(desc_good)
+                await sm.get_or_create(desc_crash)
+        except BaseException:
+            pass
+
+        # The good singleton should have been torn down when the
+        # crashing singleton caused the TaskGroup to cancel.
+        self.assertTrue(torn_down)
