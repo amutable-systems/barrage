@@ -18,6 +18,7 @@ Or run this file directly::
 """
 
 import asyncio
+import contextlib
 import io
 import sys
 import time
@@ -2068,6 +2069,62 @@ class TestFailfast(AsyncTestCase):
 
         # At least the failure was recorded.
         self.assertGreaterEqual(len(result.failures) + len(result.errors), 1)
+
+
+class TestCancellation(AsyncTestCase):
+    """Tests that cancelling the runner (equivalent of Ctrl+C) properly
+    interrupts running tests and still runs tearDown/tearDownClass."""
+
+    async def test_cancellation_interrupts_concurrent_tests(self) -> None:
+        """Cancelling the runner task interrupts all running tests,
+        runs tearDown and tearDownClass, and marks tests as interrupted."""
+        teardown_count = 0
+        teardown_class_ran = False
+
+        class _Inner(AsyncTestCase, concurrent=True):
+            async def test_a(self) -> None:
+                await asyncio.sleep(10)
+
+            async def test_b(self) -> None:
+                await asyncio.sleep(10)
+
+            async def test_c(self) -> None:
+                await asyncio.sleep(10)
+
+            async def tearDown(self) -> None:
+                nonlocal teardown_count
+                teardown_count += 1
+
+            @classmethod
+            async def tearDownClass(cls) -> None:
+                nonlocal teardown_class_ran
+                teardown_class_ran = True
+
+        teardown_count = 0
+        teardown_class_ran = False
+
+        runner = AsyncTestRunner(verbosity=0)
+
+        # Run the inner suite in its own task so we can cancel it
+        # without cancelling the outer (meta-)test.
+        runner_task = asyncio.create_task(runner.run_classes_async(_Inner))
+
+        # Cancel the runner task after a short delay so the inner tests
+        # have time to start running.
+        await asyncio.sleep(0.1)
+        runner_task.cancel()
+
+        with contextlib.suppress(asyncio.CancelledError):
+            await runner_task
+
+        result = runner.result
+
+        self.assertGreater(len(result.interrupted), 0, "expected at least one interrupted test")
+        self.assertEqual(
+            teardown_count, len(result.interrupted), "tearDown should run for each interrupted test"
+        )
+        self.assertTrue(teardown_class_ran, "tearDownClass should have run")
+        self.assertFalse(result.was_successful, "interrupted run should not be successful")
 
 
 class TestMonitored(AsyncTestCase):
