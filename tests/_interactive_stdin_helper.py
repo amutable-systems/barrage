@@ -10,6 +10,7 @@ stdin connected, the inner test reads the string and passes.
 """
 
 import asyncio
+import os
 import sys
 
 from barrage.case import AsyncTestCase
@@ -17,5 +18,16 @@ from barrage.case import AsyncTestCase
 
 class InteractiveStdinTest(AsyncTestCase):
     async def test_read_from_stdin(self) -> None:
-        line = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
-        assert line.strip() == "hello from outer test", f"unexpected stdin: {line!r}"
+        devnull_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            is_devnull = os.path.sameopenfile(sys.stdin.fileno(), devnull_fd)
+        finally:
+            os.close(devnull_fd)
+        if is_devnull:
+            line = b""
+        else:
+            loop = asyncio.get_running_loop()
+            reader = asyncio.StreamReader()
+            await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+            line = await reader.readline()
+        assert line.strip() == b"hello from outer test", f"unexpected stdin: {line!r}"
