@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: MIT
 import asyncio
+import contextlib
 import contextvars
 import inspect
 import io
 import os
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Generator, Iterable
 from typing import TextIO
 
 from barrage.case import AsyncTestCase, SkipTest
@@ -99,48 +100,53 @@ class _CaptureContext:
     _saved_stdout: TextIO | None = None
     _saved_stderr: TextIO | None = None
 
-    @classmethod
-    def install(cls) -> None:
-        cls._refcount += 1
-        if cls._refcount == 1:
-            cls._saved_stdout = sys.stdout
-            cls._saved_stderr = sys.stderr
-            sys.stdout = _CapturingStream(cls._saved_stdout, _capture_stdout)
-            sys.stderr = _CapturingStream(cls._saved_stderr, _capture_stderr)
+    def __enter__(self) -> None:
+        type(self)._refcount += 1
+        if type(self)._refcount == 1:
+            saved_stdout = type(self)._saved_stdout = sys.stdout
+            saved_stderr = type(self)._saved_stderr = sys.stderr
+            sys.stdout = _CapturingStream(saved_stdout, _capture_stdout)
+            sys.stderr = _CapturingStream(saved_stderr, _capture_stderr)
 
-    @classmethod
-    def uninstall(cls) -> None:
-        cls._refcount -= 1
-        if cls._refcount == 0:
-            if cls._saved_stdout is not None:
-                sys.stdout = cls._saved_stdout
-            if cls._saved_stderr is not None:
-                sys.stderr = cls._saved_stderr
-            cls._saved_stdout = None
-            cls._saved_stderr = None
+    def __exit__(self, *args: object) -> None:
+        type(self)._refcount -= 1
+        if type(self)._refcount == 0:
+            if type(self)._saved_stdout is not None:
+                sys.stdout = type(self)._saved_stdout
+            if type(self)._saved_stderr is not None:
+                sys.stderr = type(self)._saved_stderr
+            type(self)._saved_stdout = None
+            type(self)._saved_stderr = None
 
 
-def _start_capture() -> tuple[
-    io.StringIO, io.StringIO, contextvars.Token[io.StringIO | None], contextvars.Token[io.StringIO | None]
-]:
-    """Begin capturing stdout/stderr for the current task context."""
+class _CapturedOutput:
+    """Holds the captured stdout/stderr buffers for a single test."""
+
+    def __init__(self, out_buf: io.StringIO, err_buf: io.StringIO) -> None:
+        self._out_buf = out_buf
+        self._err_buf = err_buf
+
+    @property
+    def stdout(self) -> str:
+        return self._out_buf.getvalue()
+
+    @property
+    def stderr(self) -> str:
+        return self._err_buf.getvalue()
+
+
+@contextlib.contextmanager
+def _capture_output() -> Generator[_CapturedOutput]:
+    """Context manager that captures stdout/stderr for the current task context."""
     out_buf = io.StringIO()
     err_buf = io.StringIO()
     out_token = _capture_stdout.set(out_buf)
     err_token = _capture_stderr.set(err_buf)
-    return out_buf, err_buf, out_token, err_token
-
-
-def _stop_capture(
-    out_buf: io.StringIO,
-    err_buf: io.StringIO,
-    out_token: contextvars.Token[io.StringIO | None],
-    err_token: contextvars.Token[io.StringIO | None],
-) -> tuple[str, str]:
-    """Stop capturing and return ``(stdout, stderr)`` strings."""
-    _capture_stdout.reset(out_token)
-    _capture_stderr.reset(err_token)
-    return out_buf.getvalue(), err_buf.getvalue()
+    try:
+        yield _CapturedOutput(out_buf, err_buf)
+    finally:
+        _capture_stdout.reset(out_token)
+        _capture_stderr.reset(err_token)
 
 
 # ===================================================================== #
@@ -237,13 +243,12 @@ class _ProgressDisplay:
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
-    async def start(self) -> None:
-        """Start the background ticker that updates the status line."""
+    async def __aenter__(self) -> "_ProgressDisplay":
         if self._is_tty:
             self._ticker_task = asyncio.create_task(self._ticker())
+        return self
 
-    async def stop(self) -> None:
-        """Cancel the ticker and erase the status line."""
+    async def __aexit__(self, *args: object) -> None:
         if self._ticker_task is not None:
             self._ticker_task.cancel()
             try:
@@ -411,6 +416,45 @@ class _OutputDetector:
         return getattr(self._original, name)
 
 
+class _OutputDetectors:
+    """Pair of output detectors for stdout and stderr."""
+
+    def __init__(self, stdout: _OutputDetector, stderr: _OutputDetector) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+
+    @property
+    def had_output(self) -> bool:
+        return self.stdout.written or self.stderr.written
+
+
+@contextlib.contextmanager
+def _replace_stdin() -> Generator[None]:
+    """Replace stdin with /dev/null, restoring it on exit."""
+    saved = sys.stdin
+    devnull = open(os.devnull)
+    sys.stdin = devnull
+    try:
+        yield
+    finally:
+        sys.stdin = saved
+        devnull.close()
+
+
+@contextlib.contextmanager
+def _detect_output() -> Generator[_OutputDetectors]:
+    """Context manager that installs output detectors on stdout/stderr."""
+    stdout_detector = _OutputDetector(sys.stdout)
+    stderr_detector = _OutputDetector(sys.stderr)
+    sys.stdout = stdout_detector  # type: ignore[assignment]
+    sys.stderr = stderr_detector  # type: ignore[assignment]
+    try:
+        yield _OutputDetectors(stdout_detector, stderr_detector)
+    finally:
+        sys.stdout = stdout_detector._original
+        sys.stderr = stderr_detector._original
+
+
 def _write_captured_output_to_stream(
     stream: TextIO,
     r: TestOutcome,
@@ -459,58 +503,33 @@ async def _run_single_test(
     instance = cls(method_name)
     method = getattr(instance, method_name)
 
-    # Check for method-level skip decorator
-    skip_reason = getattr(method, "__skip_reason__", None)
-    if skip_reason is not None:
-        recorded = await result.add_skip(instance, skip_reason)
-        if interactive_stream is not None:
-            _interactive_line(interactive_stream, instance, Outcome.SKIPPED, 0.0, skip_reason)
-        if progress is not None:
-            await progress.test_finished(recorded)
-        return
+    async with contextlib.AsyncExitStack() as stack:
+        await stack.enter_async_context(semaphore)
 
-    async with semaphore:
         # Notify progress that this test is now actively running.
         if progress is not None:
             await progress.test_started(instance.id(), str(instance))
 
-        # ── optional output capture ──────────────────────────────────
-        cap_state: (
-            tuple[
-                io.StringIO,
-                io.StringIO,
-                contextvars.Token[io.StringIO | None],
-                contextvars.Token[io.StringIO | None],
-            ]
-            | None
-        ) = None
-        if capture:
-            cap_state = _start_capture()
+        # ── optional output capture ──────────────────────────────
+        captured = stack.enter_context(_capture_output()) if capture else None
 
-        # ── interactive prefix + output detection ────────────────────
-        stdout_detector: _OutputDetector | None = None
-        stderr_detector: _OutputDetector | None = None
+        # ── interactive prefix + output detection ────────────────
         if interactive_stream is not None:
             _interactive_pre(
                 interactive_stream,
                 instance,
                 colorize=colorize,
             )
-            stdout_detector = _OutputDetector(sys.stdout)
-            stderr_detector = _OutputDetector(sys.stderr)
-            sys.stdout = stdout_detector  # type: ignore[assignment]
-            sys.stderr = stderr_detector  # type: ignore[assignment]
+        detectors = stack.enter_context(_detect_output()) if interactive_stream is not None else None
 
         t0 = time.monotonic()
 
-        # ── setUp ────────────────────────────────────────────────────
+        # ── setUp ────────────────────────────────────────────────
         try:
             await instance.setUp()
         except SkipTest as exc:
-            stdout, stderr = _stop_capture(*cap_state) if cap_state else ("", "")
             recorded = await result.add_skip(instance, exc.reason)
             if interactive_stream is not None:
-                had_output = _uninstall_detectors(stdout_detector, stderr_detector)
                 _interactive_line(
                     interactive_stream,
                     instance,
@@ -518,27 +537,27 @@ async def _run_single_test(
                     0.0,
                     exc.reason,
                     colorize=colorize,
-                    had_output=had_output,
+                    had_output=detectors.had_output if detectors else False,
                 )
             if progress is not None:
                 await progress.test_finished(recorded)
             return
         except Exception as exc:
             duration = time.monotonic() - t0
-            stdout, stderr = _stop_capture(*cap_state) if cap_state else ("", "")
+            stdout = captured.stdout if captured else ""
+            stderr = captured.stderr if captured else ""
             tb = capture_excepthook(type(exc), exc, exc.__traceback__, colorize=colorize)
             recorded = await result.add_error(
                 instance, exc, duration, stdout=stdout, stderr=stderr, traceback_str=tb
             )
             if interactive_stream is not None:
-                had_output = _uninstall_detectors(stdout_detector, stderr_detector)
                 _interactive_line(
                     interactive_stream,
                     instance,
                     Outcome.ERRORED,
                     duration,
                     colorize=colorize,
-                    had_output=had_output,
+                    had_output=detectors.had_output if detectors else False,
                 )
                 _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
             if progress is not None:
@@ -547,7 +566,7 @@ async def _run_single_test(
                 stop_event.set()
             return
 
-        # ── test method ──────────────────────────────────────────────
+        # ── test method ──────────────────────────────────────────
         test_exc: BaseException | None = None
         test_is_skip = False
         test_is_failure = False
@@ -562,7 +581,7 @@ async def _run_single_test(
         except Exception as exc:
             test_exc = exc
 
-        # ── tearDown (always attempted) ──────────────────────────────
+        # ── tearDown (always attempted) ──────────────────────────
         teardown_exc: Exception | None = None
         try:
             await instance.tearDown()
@@ -570,12 +589,11 @@ async def _run_single_test(
             teardown_exc = exc
 
         duration = time.monotonic() - t0
-        stdout, stderr = _stop_capture(*cap_state) if cap_state else ("", "")
+        stdout = captured.stdout if captured else ""
+        stderr = captured.stderr if captured else ""
+        had_output = detectors.had_output if detectors else False
 
-        # ── remove output detectors before writing results ───────────
-        had_output = _uninstall_detectors(stdout_detector, stderr_detector)
-
-        # ── record outcome ───────────────────────────────────────────
+        # ── record outcome ───────────────────────────────────────
         if test_is_skip:
             assert isinstance(test_exc, SkipTest)
             recorded = await result.add_skip(instance, test_exc.reason)
@@ -684,20 +702,6 @@ async def _run_class(
     if stop_event is not None and stop_event.is_set():
         return
 
-    # Check class-level skip
-    skip_reason = getattr(cls, "__skip_reason__", None)
-    if skip_reason is not None:
-        for name in method_names:
-            instance = cls(name)
-            recorded = await result.add_skip(instance, skip_reason)
-            if interactive_stream is not None:
-                _interactive_line(
-                    interactive_stream, instance, Outcome.SKIPPED, 0.0, skip_reason, colorize=colorize
-                )
-            if progress is not None:
-                await progress.test_finished(recorded)
-        return
-
     if interactive_stream is not None:
         cls_name = cls.__qualname__
         if colorize:
@@ -710,52 +714,41 @@ async def _run_class(
     # setUpClass – capture stdout/stderr so that background tasks
     # spawned here (e.g. MonitoredTestCase.monitor_async_context) inherit
     # the capture context-var and don't leak output to the terminal.
-    setup_cap: (
-        tuple[
-            io.StringIO,
-            io.StringIO,
-            contextvars.Token[io.StringIO | None],
-            contextvars.Token[io.StringIO | None],
-        ]
-        | None
-    ) = None
-    if capture:
-        setup_cap = _start_capture()
-    try:
-        await cls.setUpClass()
-    except SkipTest as exc:
-        if progress is not None:
-            await progress.class_setup_finished(cls.__qualname__)
-        if setup_cap:
-            _stop_capture(*setup_cap)
-        for name in method_names:
-            instance = cls(name)
-            recorded = await result.add_skip(instance, exc.reason)
-            if interactive_stream is not None:
-                _interactive_line(
-                    interactive_stream, instance, Outcome.SKIPPED, 0.0, exc.reason, colorize=colorize
+    with _capture_output() if capture else contextlib.nullcontext() as setup_captured:
+        try:
+            await cls.setUpClass()
+        except SkipTest as exc:
+            if progress is not None:
+                await progress.class_setup_finished(cls.__qualname__)
+            for name in method_names:
+                instance = cls(name)
+                recorded = await result.add_skip(instance, exc.reason)
+                if interactive_stream is not None:
+                    _interactive_line(
+                        interactive_stream, instance, Outcome.SKIPPED, 0.0, exc.reason, colorize=colorize
+                    )
+                if progress is not None:
+                    await progress.test_finished(recorded)
+            return
+        except Exception as exc:
+            if progress is not None:
+                await progress.class_setup_finished(cls.__qualname__)
+            stdout = setup_captured.stdout if setup_captured else ""
+            stderr = setup_captured.stderr if setup_captured else ""
+            # If setUpClass fails, record an error for each test and skip them.
+            tb = capture_excepthook(type(exc), exc, exc.__traceback__, colorize=colorize)
+            for name in method_names:
+                instance = cls(name)
+                recorded = await result.add_error(
+                    instance, exc, 0.0, stdout=stdout, stderr=stderr, traceback_str=tb
                 )
-            if progress is not None:
-                await progress.test_finished(recorded)
-        return
-    except Exception as exc:
-        if progress is not None:
-            await progress.class_setup_finished(cls.__qualname__)
-        stdout, stderr = _stop_capture(*setup_cap) if setup_cap else ("", "")
-        # If setUpClass fails, record an error for each test and skip them.
-        tb = capture_excepthook(type(exc), exc, exc.__traceback__, colorize=colorize)
-        for name in method_names:
-            instance = cls(name)
-            recorded = await result.add_error(
-                instance, exc, 0.0, stdout=stdout, stderr=stderr, traceback_str=tb
-            )
-            if interactive_stream is not None:
-                _interactive_line(interactive_stream, instance, Outcome.ERRORED, 0.0, colorize=colorize)
-                _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
-            if progress is not None:
-                await progress.test_finished(recorded)
-        return
-    else:
+                if interactive_stream is not None:
+                    _interactive_line(interactive_stream, instance, Outcome.ERRORED, 0.0, colorize=colorize)
+                    _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
+                if progress is not None:
+                    await progress.test_finished(recorded)
+            return
+
         if progress is not None:
             await progress.class_setup_finished(cls.__qualname__)
         # setUpClass succeeded – stop capturing its direct output but
@@ -763,31 +756,27 @@ async def _run_class(
         # during setUpClass already copied the context-var pointing at
         # these buffers, so they will keep writing there instead of to
         # the real stream.
-        if setup_cap:
-            _stop_capture(*setup_cap)
 
     try:
         concurrent = cls.__concurrent__ and interactive_stream is None
         if concurrent:
             # Run all test methods concurrently
-            tasks = [
-                asyncio.create_task(
-                    _run_single_test(
-                        cls,
-                        name,
-                        result,
-                        semaphore,
-                        capture=capture,
-                        colorize=colorize,
-                        interactive_stream=interactive_stream,
-                        progress=progress,
-                        stop_event=stop_event,
-                    ),
-                    name=f"{cls.__qualname__}.{name}",
-                )
-                for name in method_names
-            ]
-            await asyncio.gather(*tasks)
+            async with asyncio.TaskGroup() as tg:
+                for name in method_names:
+                    tg.create_task(
+                        _run_single_test(
+                            cls,
+                            name,
+                            result,
+                            semaphore,
+                            capture=capture,
+                            colorize=colorize,
+                            interactive_stream=interactive_stream,
+                            progress=progress,
+                            stop_event=stop_event,
+                        ),
+                        name=f"{cls.__qualname__}.{name}",
+                    )
         else:
             # Run test methods sequentially (in sorted order)
             for name in method_names:
@@ -806,36 +795,24 @@ async def _run_class(
                 )
     finally:
         # tearDownClass – always attempt it, with output capture.
-        teardown_cap: (
-            tuple[
-                io.StringIO,
-                io.StringIO,
-                contextvars.Token[io.StringIO | None],
-                contextvars.Token[io.StringIO | None],
-            ]
-            | None
-        ) = None
-        if capture:
-            teardown_cap = _start_capture()
-        try:
-            await cls.tearDownClass()
-        except Exception as exc:
-            stdout, stderr = _stop_capture(*teardown_cap) if teardown_cap else ("", "")
-            # Record the tearDownClass failure against a synthetic test id
-            tb = capture_excepthook(type(exc), exc, exc.__traceback__, colorize=colorize)
-            instance = cls("tearDownClass")
-            instance._test_method_name = "tearDownClass"
-            recorded = await result.add_error(
-                instance, exc, 0.0, stdout=stdout, stderr=stderr, traceback_str=tb
-            )
-            if interactive_stream is not None:
-                _interactive_line(interactive_stream, instance, Outcome.ERRORED, 0.0, colorize=colorize)
-                _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
-            if progress is not None:
-                await progress.test_finished(recorded)
-        else:
-            if teardown_cap:
-                _stop_capture(*teardown_cap)
+        with _capture_output() if capture else contextlib.nullcontext() as teardown_captured:
+            try:
+                await cls.tearDownClass()
+            except Exception as exc:
+                stdout = teardown_captured.stdout if teardown_captured else ""
+                stderr = teardown_captured.stderr if teardown_captured else ""
+                # Record the tearDownClass failure against a synthetic test id
+                tb = capture_excepthook(type(exc), exc, exc.__traceback__, colorize=colorize)
+                instance = cls("tearDownClass")
+                instance._test_method_name = "tearDownClass"
+                recorded = await result.add_error(
+                    instance, exc, 0.0, stdout=stdout, stderr=stderr, traceback_str=tb
+                )
+                if interactive_stream is not None:
+                    _interactive_line(interactive_stream, instance, Outcome.ERRORED, 0.0, colorize=colorize)
+                    _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
+                if progress is not None:
+                    await progress.test_finished(recorded)
 
 
 # ===================================================================== #
@@ -878,23 +855,6 @@ def _interactive_pre(
         display = f"  {method} ({cls}) ... "
     stream.write(display + "\n")
     stream.flush()
-
-
-def _uninstall_detectors(
-    stdout_detector: _OutputDetector | None,
-    stderr_detector: _OutputDetector | None,
-) -> bool:
-    """Remove output detectors and return whether any output was written.
-
-    Restores ``sys.stdout`` and ``sys.stderr`` to their unwrapped
-    originals.  Returns ``False`` when both detectors are ``None``
-    (non-interactive path).
-    """
-    if stdout_detector is None or stderr_detector is None:
-        return False
-    sys.stdout = stdout_detector._original
-    sys.stderr = stderr_detector._original
-    return stdout_detector.written or stderr_detector.written
 
 
 def _interactive_line(
@@ -1076,84 +1036,67 @@ class AsyncTestRunner:
         # its output is never captured into a test's buffer.
         real_stdout = sys.stdout
 
-        if capture:
-            _CaptureContext.install()
+        async with contextlib.AsyncExitStack() as suite_stack:
+            if capture:
+                suite_stack.enter_context(_CaptureContext())
 
-        # ── replace stdin with /dev/null (non-interactive only) ──────
-        # When not in interactive mode, tests must not block waiting for
-        # terminal input.  Point sys.stdin at /dev/null so any accidental
-        # read returns EOF immediately.
-        saved_stdin: TextIO | None = None
-        devnull: TextIO | None = None
-        if not self.interactive:
-            saved_stdin = sys.stdin
-            devnull = open(os.devnull)
-            sys.stdin = devnull
+            # ── replace stdin with /dev/null (non-interactive only) ──
+            # When not in interactive mode, tests must not block waiting
+            # for terminal input.  Point sys.stdin at /dev/null so any
+            # accidental read returns EOF immediately.
+            if not self.interactive:
+                suite_stack.enter_context(_replace_stdin())
 
-        # ── set up live progress display (non-interactive only) ──────
-        total_tests = sum(len(methods) for _, methods in entries)
-        progress: _ProgressDisplay | None = None
-        if not self.interactive and self.verbosity >= 1:
-            is_tty = False
-            try:
-                is_tty = real_stdout.isatty()
-            except (AttributeError, ValueError):
-                pass
-            progress = _ProgressDisplay(
-                stream=real_stdout,
-                total=total_tests,
-                is_tty=is_tty,
-                verbosity=self.verbosity,
-                show_output=self.show_output,
-                color=colorize,
-            )
-            self.streamed_results = self.verbosity >= 1
-        else:
-            self.streamed_results = False
-
-        # ── print pre-run overview ───────────────────────────────────
-        if self.verbosity >= 1:
-            overview_entries = [(cls.__qualname__, len(methods)) for cls, methods in entries]
-            overview = colored_overview(overview_entries, total_tests, color=colorize)
-            overview_stream = interactive_stream if interactive_stream is not None else real_stdout
-            overview_stream.write(overview)
-            overview_stream.flush()
-
-        result.start_time = time.monotonic()
-
-        async def run_tests() -> None:
-            """Run all test classes, with optional singleton injection."""
-            if has_singletons:
-                async with SingletonManager() as sm:
-                    await sm.inject(entries)
-                    await _run_all_classes()
-            else:
-                await _run_all_classes()
-
-        async def _run_all_classes() -> None:
-            if self.interactive:
-                # In interactive mode run classes sequentially so that
-                # their output is not interleaved.
-                for cls, methods in entries:
-                    if stop_event is not None and stop_event.is_set():
-                        break
-                    await _run_class(
-                        cls,
-                        methods,
-                        result,
-                        semaphore,
-                        capture=capture,
-                        colorize=colorize,
-                        interactive_stream=interactive_stream,
-                        progress=progress,
-                        stop_event=stop_event,
+            # ── set up live progress display (non-interactive only) ──
+            total_tests = sum(len(methods) for _, methods in entries)
+            progress: _ProgressDisplay | None = None
+            if not self.interactive and self.verbosity >= 1:
+                is_tty = False
+                try:
+                    is_tty = real_stdout.isatty()
+                except (AttributeError, ValueError):
+                    pass
+                progress = await suite_stack.enter_async_context(
+                    _ProgressDisplay(
+                        stream=real_stdout,
+                        total=total_tests,
+                        is_tty=is_tty,
+                        verbosity=self.verbosity,
+                        show_output=self.show_output,
+                        color=colorize,
                     )
+                )
+                self.streamed_results = self.verbosity >= 1
             else:
-                # Each class gets its own task so that different classes
-                # run concurrently.
-                class_tasks = [
-                    asyncio.create_task(
-                        _run_class(
+                self.streamed_results = False
+
+            # ── print pre-run overview ───────────────────────────────
+            if self.verbosity >= 1:
+                overview_entries = [(cls.__qualname__, len(methods)) for cls, methods in entries]
+                overview = colored_overview(overview_entries, total_tests, color=colorize)
+                overview_stream = interactive_stream if interactive_stream is not None else real_stdout
+                overview_stream.write(overview)
+                overview_stream.flush()
+
+            result.start_time = time.monotonic()
+
+            async def run_tests() -> None:
+                """Run all test classes, with optional singleton injection."""
+                if has_singletons:
+                    async with SingletonManager() as sm:
+                        await sm.inject(entries)
+                        await _run_all_classes()
+                else:
+                    await _run_all_classes()
+
+            async def _run_all_classes() -> None:
+                if self.interactive:
+                    # In interactive mode run classes sequentially so that
+                    # their output is not interleaved.
+                    for cls, methods in entries:
+                        if stop_event is not None and stop_event.is_set():
+                            break
+                        await _run_class(
                             cls,
                             methods,
                             result,
@@ -1163,26 +1106,28 @@ class AsyncTestRunner:
                             interactive_stream=interactive_stream,
                             progress=progress,
                             stop_event=stop_event,
-                        ),
-                        name=f"class:{cls.__qualname__}",
-                    )
-                    for cls, methods in entries
-                ]
-                await asyncio.gather(*class_tasks)
+                        )
+                else:
+                    # Each class gets its own task so that different classes
+                    # run concurrently.
+                    async with asyncio.TaskGroup() as tg:
+                        for cls, methods in entries:
+                            tg.create_task(
+                                _run_class(
+                                    cls,
+                                    methods,
+                                    result,
+                                    semaphore,
+                                    capture=capture,
+                                    colorize=colorize,
+                                    interactive_stream=interactive_stream,
+                                    progress=progress,
+                                    stop_event=stop_event,
+                                ),
+                                name=f"class:{cls.__qualname__}",
+                            )
 
-        try:
-            if progress is not None:
-                await progress.start()
             await run_tests()
-        finally:
-            if progress is not None:
-                await progress.stop()
-            if capture:
-                _CaptureContext.uninstall()
-            if saved_stdin is not None:
-                sys.stdin = saved_stdin
-            if devnull is not None:
-                devnull.close()
 
         result.end_time = time.monotonic()
 

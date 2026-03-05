@@ -268,13 +268,10 @@ async def spawn(
         # terminates the process.
         await proc.wait()
     except BaseException:
-        # On any error or cancellation, terminate the subprocess so
-        # that it exits promptly and the relay tasks see EOF.
-        if proc.returncode is None:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
         raise
     finally:
         # Wait for the subprocess to exit, then drain every relay task.
