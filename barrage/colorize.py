@@ -105,6 +105,7 @@ _OUTCOME_STYLES: dict[str, tuple[str, ...]] = {
     "FAILED": (ANSI.BOLD_RED,),
     "ERRORED": (ANSI.BOLD_RED,),
     "SKIPPED": (ANSI.YELLOW,),
+    "INTERRUPTED": (ANSI.BOLD_RED,),
 }
 
 _OUTCOME_PLAIN_SYMBOLS: dict[str, str] = {
@@ -112,6 +113,7 @@ _OUTCOME_PLAIN_SYMBOLS: dict[str, str] = {
     "FAILED": "✗",
     "ERRORED": "E",
     "SKIPPED": "S",
+    "INTERRUPTED": "I",
 }
 
 
@@ -172,6 +174,8 @@ def colored_result_line(
             name = style(test_str, ANSI.BOLD_RED)
         elif outcome_name == "SKIPPED":
             name = style(test_str, ANSI.YELLOW)
+        elif outcome_name == "INTERRUPTED":
+            name = style(test_str, ANSI.BOLD_RED)
         return f"  {sym} {name} ({dur})"
     return f"  {sym} {test_str} ({dur})"
 
@@ -198,6 +202,7 @@ def colored_summary(
     n_failures: int = 0,
     n_errors: int = 0,
     n_skipped: int = 0,
+    n_interrupted: int = 0,
     color: bool = True,
 ) -> str:
     """Build the final summary block (separator + counts + OK/FAILED)."""
@@ -213,6 +218,8 @@ def colored_summary(
         parts: list[str] = []
         if n_skipped:
             parts.append(f"skipped={n_skipped}")
+        if n_interrupted:
+            parts.append(f"interrupted={n_interrupted}")
         extra = f" ({', '.join(parts)})" if parts else ""
         ok_text = f"OK{extra}"
         if color:
@@ -226,6 +233,8 @@ def colored_summary(
             parts.append(f"errors={n_errors}")
         if n_skipped:
             parts.append(f"skipped={n_skipped}")
+        if n_interrupted:
+            parts.append(f"interrupted={n_interrupted}")
         fail_text = f"FAILED ({', '.join(parts)})"
         if color:
             fail_text = style(fail_text, ANSI.BOLD_RED)

@@ -23,6 +23,7 @@ class Outcome(Enum):
     FAILED = auto()
     ERRORED = auto()
     SKIPPED = auto()
+    INTERRUPTED = auto()
 
 
 @dataclass
@@ -129,6 +130,16 @@ class AsyncTestResult:
             self.results.append(outcome)
         return outcome
 
+    async def add_interrupted(self, test: "AsyncTestCase") -> TestOutcome:
+        outcome = TestOutcome(
+            test_id=test.id(),
+            test_str=str(test),
+            outcome=Outcome.INTERRUPTED,
+        )
+        async with self._lock:
+            self.results.append(outcome)
+        return outcome
+
     # ------------------------------------------------------------------ #
     # Queries
     # ------------------------------------------------------------------ #
@@ -150,12 +161,16 @@ class AsyncTestResult:
         return [r for r in self.results if r.outcome is Outcome.SKIPPED]
 
     @property
+    def interrupted(self) -> list[TestOutcome]:
+        return [r for r in self.results if r.outcome is Outcome.INTERRUPTED]
+
+    @property
     def tests_run(self) -> int:
         return len(self.results)
 
     @property
     def was_successful(self) -> bool:
-        return len(self.failures) == 0 and len(self.errors) == 0
+        return len(self.failures) == 0 and len(self.errors) == 0 and len(self.interrupted) == 0
 
     @property
     def total_duration(self) -> float:
@@ -237,6 +252,7 @@ class AsyncTestResult:
                 n_failures=len(self.failures),
                 n_errors=len(self.errors),
                 n_skipped=len(self.skipped),
+                n_interrupted=len(self.interrupted),
                 color=color,
             )
         )
@@ -272,4 +288,5 @@ _OUTCOME_SYMBOLS: dict[Outcome, str] = {
     Outcome.FAILED: "✗",
     Outcome.ERRORED: "E",
     Outcome.SKIPPED: "S",
+    Outcome.INTERRUPTED: "C",
 }

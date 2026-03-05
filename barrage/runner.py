@@ -543,7 +543,21 @@ async def _run_single_test(
             if progress is not None:
                 await progress.test_finished(recorded)
             return
-        except Exception as exc:
+        except asyncio.CancelledError:
+            recorded = await result.add_interrupted(instance)
+            if interactive_stream is not None:
+                _interactive_line(
+                    interactive_stream,
+                    instance,
+                    Outcome.INTERRUPTED,
+                    0.0,
+                    colorize=colorize,
+                    had_output=detectors.had_output if detectors else False,
+                )
+            if progress is not None:
+                await progress.test_finished(recorded)
+            raise
+        except BaseException as exc:
             duration = time.monotonic() - t0
             stdout = captured.stdout if captured else ""
             stderr = captured.stderr if captured else ""
@@ -595,7 +609,21 @@ async def _run_single_test(
         had_output = detectors.had_output if detectors else False
 
         # ── record outcome ───────────────────────────────────────
-        if test_is_skip:
+        if cancelled_exc is not None:
+            recorded = await result.add_interrupted(instance)
+            if interactive_stream is not None:
+                _interactive_line(
+                    interactive_stream,
+                    instance,
+                    Outcome.INTERRUPTED,
+                    duration,
+                    colorize=colorize,
+                    had_output=had_output,
+                )
+            if progress is not None:
+                await progress.test_finished(recorded)
+            raise cancelled_exc
+        elif test_is_skip:
             assert isinstance(test_exc, SkipTest)
             recorded = await result.add_skip(instance, test_exc.reason)
             if interactive_stream is not None:
@@ -817,6 +845,7 @@ _OUTCOME_LABELS: dict[Outcome, str] = {
     Outcome.FAILED: "FAIL",
     Outcome.ERRORED: "ERROR",
     Outcome.SKIPPED: "SKIPPED",
+    Outcome.INTERRUPTED: "INTERRUPTED",
 }
 
 _OUTCOME_LABEL_STYLES: dict[Outcome, tuple[str, ...]] = {
@@ -824,6 +853,7 @@ _OUTCOME_LABEL_STYLES: dict[Outcome, tuple[str, ...]] = {
     Outcome.FAILED: (ANSI.BOLD_RED,),
     Outcome.ERRORED: (ANSI.BOLD_RED,),
     Outcome.SKIPPED: (ANSI.YELLOW,),
+    Outcome.INTERRUPTED: (ANSI.BOLD_RED,),
 }
 
 
@@ -986,7 +1016,7 @@ class AsyncTestRunner:
 
     async def run_suite_async(self, suite: AsyncTestSuite) -> AsyncTestResult:
         """Run the suite inside an already-running event loop."""
-        result = AsyncTestResult()
+        result = self.result = AsyncTestResult()
         entries = suite.entries
 
         # ── singleton injection ───────────────────────────────────────

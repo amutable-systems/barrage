@@ -2351,9 +2351,10 @@ class TestMonitored(AsyncTestCase):
 
                 async def crash_later() -> None:
                     await asyncio.sleep(0.01)
-                    crash_component.set_exception(
-                        RuntimeError("WARNING: component crashed: ['crashing test-component']")
-                    )
+                    if not crash_component.done():
+                        crash_component.set_exception(
+                            RuntimeError("WARNING: component crashed: ['crashing test-component']")
+                        )
 
                 # we trigger the crash with a delay which aborts the test
                 asyncio.create_task(crash_later())
