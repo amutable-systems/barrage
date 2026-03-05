@@ -129,7 +129,11 @@ def main(argv: list[str] | None = None) -> int:
         show_output=args.show_output,
         failfast=args.failfast,
     )
-    result = runner.run_suite(suite)
+
+    try:
+        runner.run_suite(suite)
+    except KeyboardInterrupt:
+        pass
 
     # When per-test lines were already streamed live (either via
     # interactive mode or via the progress display), cap the report
@@ -140,14 +144,14 @@ def main(argv: list[str] | None = None) -> int:
         report_verbosity = min(args.verbosity, 1)
     else:
         report_verbosity = args.verbosity
-    report = result.format_report(
+    report = runner.result.format_report(
         verbosity=report_verbosity,
         show_output=args.show_output,
         color=should_colorize(sys.stdout),
     )
     print(report, end="")
 
-    return 0 if result.was_successful else 1
+    return 0 if runner.result.was_successful else 1
 
 
 if __name__ == "__main__":
