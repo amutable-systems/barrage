@@ -483,6 +483,10 @@ def _write_captured_output_to_stream(
 # ===================================================================== #
 
 
+class _FailFast(Exception):
+    """Raised when failfast is enabled and a test fails or errors."""
+
+
 async def _run_single_test(
     cls: type[AsyncTestCase],
     method_name: str,
@@ -493,12 +497,9 @@ async def _run_single_test(
     colorize: bool = False,
     interactive_stream: TextIO | None = None,
     progress: _ProgressDisplay | None = None,
-    stop_event: asyncio.Event | None = None,
+    failfast: bool = False,
 ) -> None:
     """Run setUp → test → tearDown for one test method, recording the outcome."""
-    # If a previous test already triggered failfast, skip immediately.
-    if stop_event is not None and stop_event.is_set():
-        return
 
     instance = cls(method_name)
     method = getattr(instance, method_name)
@@ -562,8 +563,8 @@ async def _run_single_test(
                 _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
             if progress is not None:
                 await progress.test_finished(recorded)
-            if stop_event is not None:
-                stop_event.set()
+            if failfast:
+                raise _FailFast() from None
             return
 
         # ── test method ──────────────────────────────────────────
@@ -623,8 +624,6 @@ async def _run_single_test(
                     had_output=had_output,
                 )
                 _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
-            if stop_event is not None:
-                stop_event.set()
         elif test_exc is not None:
             tb = capture_excepthook(type(test_exc), test_exc, test_exc.__traceback__, colorize=colorize)
             recorded = await result.add_error(
@@ -640,8 +639,6 @@ async def _run_single_test(
                     had_output=had_output,
                 )
                 _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
-            if stop_event is not None:
-                stop_event.set()
         elif teardown_exc is not None:
             tb = capture_excepthook(
                 type(teardown_exc), teardown_exc, teardown_exc.__traceback__, colorize=colorize
@@ -659,8 +656,6 @@ async def _run_single_test(
                     had_output=had_output,
                 )
                 _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
-            if stop_event is not None:
-                stop_event.set()
         else:
             recorded = await result.add_success(instance, duration, stdout=stdout, stderr=stderr)
             if interactive_stream is not None:
@@ -676,6 +671,9 @@ async def _run_single_test(
         if progress is not None:
             await progress.test_finished(recorded)
 
+        if failfast and recorded.outcome in (Outcome.FAILED, Outcome.ERRORED):
+            raise _FailFast()
+
 
 async def _run_class(
     cls: type[AsyncTestCase],
@@ -687,7 +685,7 @@ async def _run_class(
     colorize: bool = False,
     interactive_stream: TextIO | None = None,
     progress: _ProgressDisplay | None = None,
-    stop_event: asyncio.Event | None = None,
+    failfast: bool = False,
 ) -> None:
     """
     Run all selected tests from a single class.
@@ -698,9 +696,6 @@ async def _run_class(
     * When *interactive_stream* is not ``None``, forces sequential
       execution and prints live results to that stream.
     """
-    # If a previous test already triggered failfast, skip this class.
-    if stop_event is not None and stop_event.is_set():
-        return
 
     if interactive_stream is not None:
         cls_name = cls.__qualname__
@@ -773,15 +768,13 @@ async def _run_class(
                             colorize=colorize,
                             interactive_stream=interactive_stream,
                             progress=progress,
-                            stop_event=stop_event,
+                            failfast=failfast,
                         ),
                         name=f"{cls.__qualname__}.{name}",
                     )
         else:
             # Run test methods sequentially (in sorted order)
             for name in method_names:
-                if stop_event is not None and stop_event.is_set():
-                    break
                 await _run_single_test(
                     cls,
                     name,
@@ -791,7 +784,7 @@ async def _run_class(
                     colorize=colorize,
                     interactive_stream=interactive_stream,
                     progress=progress,
-                    stop_event=stop_event,
+                    failfast=failfast,
                 )
     finally:
         # tearDownClass – always attempt it, with output capture.
@@ -999,13 +992,6 @@ class AsyncTestRunner:
         # ── singleton injection ───────────────────────────────────────
         has_singletons = any(discover_singletons(cls) for cls, _methods in entries)
 
-        # Create a stop event when failfast is enabled.  It is shared
-        # across all test tasks so that a failure anywhere signals the
-        # rest to stop.
-        stop_event: asyncio.Event | None = None
-        if self.failfast:
-            stop_event = asyncio.Event()
-
         interactive_stream: TextIO | None = None
         capture: bool
         if self.interactive:
@@ -1094,8 +1080,6 @@ class AsyncTestRunner:
                     # In interactive mode run classes sequentially so that
                     # their output is not interleaved.
                     for cls, methods in entries:
-                        if stop_event is not None and stop_event.is_set():
-                            break
                         await _run_class(
                             cls,
                             methods,
@@ -1105,7 +1089,7 @@ class AsyncTestRunner:
                             colorize=colorize,
                             interactive_stream=interactive_stream,
                             progress=progress,
-                            stop_event=stop_event,
+                            failfast=self.failfast,
                         )
                 else:
                     # Each class gets its own task so that different classes
@@ -1122,12 +1106,15 @@ class AsyncTestRunner:
                                     colorize=colorize,
                                     interactive_stream=interactive_stream,
                                     progress=progress,
-                                    stop_event=stop_event,
+                                    failfast=self.failfast,
                                 ),
                                 name=f"class:{cls.__qualname__}",
                             )
 
-            await run_tests()
+            try:
+                await run_tests()
+            except* _FailFast:
+                pass
 
         result.end_time = time.monotonic()
 
