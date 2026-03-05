@@ -581,27 +581,34 @@ async def _run_single_test(
                 raise _FailFast() from None
             return
 
-        # ── test method ──────────────────────────────────────────
+        # ── test method + tearDown ───────────────────────────────
+        # tearDown runs in a finally so it executes even on cancellation.
         test_exc: BaseException | None = None
         test_is_skip = False
         test_is_failure = False
+        cancelled_exc: asyncio.CancelledError | None = None
+        teardown_exc: BaseException | None = None
         try:
-            await method()
-        except SkipTest as exc:
-            test_exc = exc
-            test_is_skip = True
-        except AssertionError as exc:
-            test_exc = exc
-            test_is_failure = True
-        except Exception as exc:
-            test_exc = exc
-
-        # ── tearDown (always attempted) ──────────────────────────
-        teardown_exc: Exception | None = None
-        try:
-            await instance.tearDown()
-        except Exception as exc:
-            teardown_exc = exc
+            try:
+                await method()
+            except asyncio.CancelledError as exc:
+                cancelled_exc = exc
+            except SkipTest as exc:
+                test_exc = exc
+                test_is_skip = True
+            except AssertionError as exc:
+                test_exc = exc
+                test_is_failure = True
+            except BaseException as exc:
+                test_exc = exc
+        finally:
+            try:
+                await instance.tearDown()
+            except asyncio.CancelledError as exc:
+                if cancelled_exc is None:
+                    cancelled_exc = exc
+            except BaseException as exc:
+                teardown_exc = exc
 
         duration = time.monotonic() - t0
         stdout = captured.stdout if captured else ""
