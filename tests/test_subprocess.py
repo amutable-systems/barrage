@@ -190,6 +190,63 @@ class TestSpawnCleanup(AsyncTestCase):
             await proc.wait()
         self.assertEqual(proc.returncode, 0)
 
+    async def test_cleanup_on_cancellation(self) -> None:
+        """When a sibling task raises inside a TaskGroup, tasks with
+        active subprocesses are cancelled.  The subprocess must be
+        killed and fully cleaned up without errors."""
+        proc_ref: asyncio.subprocess.Process | None = None
+
+        async def slow_subprocess() -> None:
+            nonlocal proc_ref
+            async with spawn(["sleep", "60"], check=False) as proc:
+                proc_ref = proc
+                await proc.wait()
+
+        async def fail_fast() -> None:
+            raise RuntimeError("boom")
+
+        with self.assertRaises(ExceptionGroup):
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(slow_subprocess())
+                # Yield so the subprocess task starts and enters spawn().
+                await asyncio.sleep(0.05)
+                tg.create_task(fail_fast())
+
+        assert proc_ref is not None
+        self.assertIsNotNone(proc_ref.returncode)
+
+    async def test_cleanup_survives_repeated_cancellation(self) -> None:
+        """If a task with an active subprocess is cancelled multiple
+        times (e.g. by an impatient caller), spawn() must still finish
+        cleanup without errors or leaked processes."""
+        proc_ref: asyncio.subprocess.Process | None = None
+        entered = asyncio.Event()
+
+        async def slow_subprocess() -> None:
+            nonlocal proc_ref
+            async with spawn(["sleep", "60"], check=False) as proc:
+                proc_ref = proc
+                entered.set()
+                await proc.wait()
+
+        task = asyncio.create_task(slow_subprocess())
+        await entered.wait()
+
+        # Cancel the task multiple times in quick succession to
+        # exercise the while-loop in spawn()'s finally block.
+        for _ in range(5):
+            task.cancel()
+            await asyncio.sleep(0.01)
+
+        # The task must finish despite the repeated cancellations.
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert proc_ref is not None
+        self.assertIsNotNone(proc_ref.returncode)
+
 
 # ===================================================================== #
 #  Output relaying (auto-detects PTY vs pipe based on real stream)

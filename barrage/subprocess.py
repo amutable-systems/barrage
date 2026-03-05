@@ -271,14 +271,29 @@ async def spawn(
         # On any error or cancellation, terminate the subprocess so
         # that it exits promptly and the relay tasks see EOF.
         if proc.returncode is None:
-            proc.terminate()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
         raise
     finally:
-        # Wait for the subprocess to exit if needed, then drain every
-        # relay task.
-        if proc.returncode is None:
-            await proc.wait()
-        await asyncio.gather(*relay_tasks)
+        # Wait for the subprocess to exit, then drain every relay task.
+        # If we get cancelled again during cleanup, escalate to SIGKILL
+        # and keep waiting — the process *will* exit after SIGKILL so
+        # this always terminates.
+        while proc.returncode is None:
+            try:
+                await proc.wait()
+            except asyncio.CancelledError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+        for task in relay_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     assert proc.returncode is not None
     if check and proc.returncode != 0:
