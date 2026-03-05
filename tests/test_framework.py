@@ -28,6 +28,7 @@ from barrage.case import AsyncTestCase, MonitoredTestCase, SkipTest
 from barrage.discovery import discover, discover_module, resolve_tests
 from barrage.result import AsyncTestResult
 from barrage.runner import AsyncTestRunner, AsyncTestSuite, _collect_test_methods
+from barrage.subprocess import PIPE, run
 
 # ===================================================================== #
 #  Helpers
@@ -1299,55 +1300,47 @@ class TestCLI(AsyncTestCase, concurrent=True):
         if not Path(sample_dir).is_dir():
             self.skipTest("sample directory missing")
 
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "barrage",
-            sample_dir,
-            "-v",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=top_dir,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        stdout_text = stdout.decode()
-        self.assertEqual(proc.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{stderr.decode()}")
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", sample_dir, "-v"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        stdout_text = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
         self.assertIn("Ran 4 test(s)", stdout_text)
         self.assertIn("OK", stdout_text)
 
     async def test_main_returns_nonzero_on_no_tests(self) -> None:
         top_dir = str(Path(__file__).resolve().parents[1])
 
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "barrage",
-            "/tmp/_barrage_no_such_dir_99999",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=top_dir,
-        )
-        await asyncio.wait_for(proc.communicate(), timeout=30)
-        self.assertEqual(proc.returncode, 2)
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", "/tmp/_barrage_no_such_dir_99999"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 2)
 
     async def test_main_file_with_class(self) -> None:
         """The CLI accepts ``file::Class`` to run a single class."""
         sample_file = str(Path(__file__).parent / "_sample_discover" / "test_sample.py")
         top_dir = str(Path(__file__).resolve().parents[1])
 
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "barrage",
-            f"{sample_file}::SamplePassingTests",
-            "-v",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=top_dir,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        stdout_text = stdout.decode()
-        self.assertEqual(proc.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{stderr.decode()}")
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", f"{sample_file}::SamplePassingTests", "-v"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        stdout_text = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
         self.assertIn("Ran 2 test(s)", stdout_text)
         self.assertIn("OK", stdout_text)
 
@@ -1356,19 +1349,16 @@ class TestCLI(AsyncTestCase, concurrent=True):
         sample_file = str(Path(__file__).parent / "_sample_discover" / "test_sample.py")
         top_dir = str(Path(__file__).resolve().parents[1])
 
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "barrage",
-            f"{sample_file}::SamplePassingTests::test_add",
-            "-v",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=top_dir,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        stdout_text = stdout.decode()
-        self.assertEqual(proc.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{stderr.decode()}")
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", f"{sample_file}::SamplePassingTests::test_add", "-v"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        stdout_text = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
         self.assertIn("Ran 1 test(s)", stdout_text)
         self.assertIn("test_add", stdout_text)
         self.assertIn("OK", stdout_text)
@@ -1378,20 +1368,23 @@ class TestCLI(AsyncTestCase, concurrent=True):
         sample_file = str(Path(__file__).parent / "_sample_discover" / "test_sample.py")
         top_dir = str(Path(__file__).resolve().parents[1])
 
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "barrage",
-            f"{sample_file}::SamplePassingTests::test_add",
-            f"{sample_file}::SampleSequentialTests::test_seq_a",
-            "-v",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=top_dir,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        stdout_text = stdout.decode()
-        self.assertEqual(proc.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{stderr.decode()}")
+        async with asyncio.timeout(30):
+            result = await run(
+                [
+                    sys.executable,
+                    "-m",
+                    "barrage",
+                    f"{sample_file}::SamplePassingTests::test_add",
+                    f"{sample_file}::SampleSequentialTests::test_seq_a",
+                    "-v",
+                ],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        stdout_text = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
         self.assertIn("Ran 2 test(s)", stdout_text)
         self.assertIn("OK", stdout_text)
 
@@ -1400,36 +1393,32 @@ class TestCLI(AsyncTestCase, concurrent=True):
         sample_file = str(Path(__file__).parent / "_sample_discover" / "test_sample.py")
         top_dir = str(Path(__file__).resolve().parents[1])
 
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "barrage",
-            f"{sample_file}::NoSuchClass",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=top_dir,
-        )
-        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        self.assertEqual(proc.returncode, 2)
-        self.assertIn("NoSuchClass", stderr.decode())
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", f"{sample_file}::NoSuchClass"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("NoSuchClass", result.stderr.decode())
 
     async def test_main_nonexistent_method_exits_2(self) -> None:
         """``file::Class::bad_method`` via CLI exits with code 2."""
         sample_file = str(Path(__file__).parent / "_sample_discover" / "test_sample.py")
         top_dir = str(Path(__file__).resolve().parents[1])
 
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "barrage",
-            f"{sample_file}::SamplePassingTests::no_such_method",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=top_dir,
-        )
-        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        self.assertEqual(proc.returncode, 2)
-        self.assertIn("no_such_method", stderr.decode())
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", f"{sample_file}::SamplePassingTests::no_such_method"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no_such_method", result.stderr.decode())
 
 
 # ===================================================================== #
@@ -1783,22 +1772,19 @@ class TestInteractiveMode(AsyncTestCase, concurrent=True):
         if not Path(sample_dir).is_dir():
             self.skipTest("sample directory missing")
 
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "barrage",
-            sample_dir,
-            "-i",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=top_dir,
-        )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=30)
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", sample_dir, "-i"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
         self.assertEqual(
-            proc.returncode, 0, f"stdout:\n{stdout_bytes.decode()}\nstderr:\n{stderr_bytes.decode()}"
+            result.returncode, 0, f"stdout:\n{result.stdout.decode()}\nstderr:\n{result.stderr.decode()}"
         )
         # In interactive mode, per-test lines go to stderr
-        stderr_text = stderr_bytes.decode()
+        stderr_text = result.stderr.decode()
         self.assertIn("test_add", stderr_text)
         self.assertIn("ok", stderr_text)
 
@@ -1872,27 +1858,22 @@ class TestInteractiveMode(AsyncTestCase, concurrent=True):
         helper = str(Path(__file__).parent / "_interactive_stdin_helper.py")
         top_dir = str(Path(__file__).resolve().parents[1])
 
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "barrage",
-            helper,
-            "-i",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=top_dir,
-        )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(input=b"hello from outer test\n"),
-            timeout=30,
-        )
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", helper, "-i"],
+                stdin=PIPE,
+                stdout=PIPE,
+                stderr=PIPE,
+                input=b"hello from outer test\n",
+                cwd=top_dir,
+                check=False,
+            )
         self.assertEqual(
-            proc.returncode,
+            result.returncode,
             0,
-            f"stdout:\n{stdout_bytes.decode()}\nstderr:\n{stderr_bytes.decode()}",
+            f"stdout:\n{result.stdout.decode()}\nstderr:\n{result.stderr.decode()}",
         )
-        stderr_text = stderr_bytes.decode()
+        stderr_text = result.stderr.decode()
         self.assertIn("test_read_from_stdin", stderr_text)
         self.assertIn("ok", stderr_text)
 
@@ -2029,19 +2010,16 @@ class TestFailfast(AsyncTestCase):
 
         # The sample tests should all pass, so -x has no effect — but
         # we verify the flag is accepted without error.
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "barrage",
-            sample_dir,
-            "-x",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=top_dir,
-        )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=30)
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", sample_dir, "-x"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
         self.assertEqual(
-            proc.returncode, 0, f"stdout:\n{stdout_bytes.decode()}\nstderr:\n{stderr_bytes.decode()}"
+            result.returncode, 0, f"stdout:\n{result.stdout.decode()}\nstderr:\n{result.stderr.decode()}"
         )
 
     async def test_failfast_no_task_leaks_concurrent(self) -> None:

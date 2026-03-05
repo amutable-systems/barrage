@@ -309,6 +309,7 @@ async def run(
     stdin: _Redirect = None,
     stdout: _Redirect = None,
     stderr: _Redirect = None,
+    input: bytes | None = None,
     env: dict[str, str] | None = None,
     cwd: str | os.PathLike[str] | None = None,
     check: bool = True,
@@ -320,12 +321,18 @@ async def run(
 
     Parameters
     ----------
+    input:
+        Data to send to the subprocess's stdin.  When provided, *stdin*
+        is automatically set to :data:`PIPE` if not already specified.
     check:
         When ``True``, raise :class:`subprocess.CalledProcessError` if
         the process returns a non-zero exit code.
 
     All other parameters are forwarded to :func:`spawn`.
     """
+    if input is not None and stdin is None:
+        stdin = PIPE
+
     stdout_data: bytes | None = None
     stderr_data: bytes | None = None
     try:
@@ -338,7 +345,7 @@ async def run(
             cwd=cwd,
             check=check,
         ) as proc:
-            stdout_data, stderr_data = await proc.communicate()
+            stdout_data, stderr_data = await proc.communicate(input=input)
     except subprocess.CalledProcessError as e:
         # Enrich the error raised by spawn() with any captured output
         # from proc.communicate().
