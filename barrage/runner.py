@@ -24,6 +24,7 @@ from barrage.colorize import (
 )
 from barrage.environ import _EnvironContext, isolated_environ
 from barrage.result import AsyncTestResult, Outcome, TestOutcome
+from barrage.selector import PriSelector
 from barrage.singleton import SingletonManager, discover_singletons
 
 
@@ -1050,7 +1051,11 @@ class AsyncTestRunner:
 
     def run_suite(self, suite: AsyncTestSuite) -> AsyncTestResult:
         """Run the suite synchronously (creates its own event loop)."""
-        return asyncio.run(self.run_suite_async(suite), debug=self.debug)
+        return asyncio.run(
+            self.run_suite_async(suite),
+            loop_factory=lambda: asyncio.SelectorEventLoop(selector=PriSelector()),
+            debug=self.debug,
+        )
 
     async def run_suite_async(self, suite: AsyncTestSuite) -> AsyncTestResult:
         """Run the suite inside an already-running event loop."""
