@@ -429,17 +429,35 @@ class _OutputDetectors:
         return self.stdout.written or self.stderr.written
 
 
-@contextlib.contextmanager
-def _replace_stdin() -> Generator[None]:
-    """Replace stdin with /dev/null, restoring it on exit."""
-    saved = sys.stdin
-    devnull = open(os.devnull)
-    sys.stdin = devnull
-    try:
-        yield
-    finally:
-        sys.stdin = saved
-        devnull.close()
+class _StdinContext:
+    """Ref-counted replacement of ``sys.stdin`` with ``/dev/null``.
+
+    Safe for nested and concurrent runners — the first enter replaces
+    stdin and the last exit restores it.
+    """
+
+    _refcount: int = 0
+    _saved: TextIO | None = None
+    _devnull: TextIO | None = None
+
+    def __enter__(self) -> None:
+        cls = type(self)
+        cls._refcount += 1
+        if cls._refcount == 1:
+            cls._saved = sys.stdin
+            cls._devnull = open(os.devnull)
+            sys.stdin = cls._devnull
+
+    def __exit__(self, *args: object) -> None:
+        cls = type(self)
+        cls._refcount -= 1
+        if cls._refcount == 0:
+            if cls._saved is not None:
+                sys.stdin = cls._saved
+            cls._saved = None
+            if cls._devnull is not None:
+                cls._devnull.close()
+                cls._devnull = None
 
 
 @contextlib.contextmanager
@@ -1083,7 +1101,7 @@ class AsyncTestRunner:
             # for terminal input.  Point sys.stdin at /dev/null so any
             # accidental read returns EOF immediately.
             if not self.interactive:
-                suite_stack.enter_context(_replace_stdin())
+                suite_stack.enter_context(_StdinContext())
 
             # ── set up live progress display (non-interactive only) ──
             total_tests = sum(len(methods) for _, methods in entries)
