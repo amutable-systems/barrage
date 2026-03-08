@@ -22,6 +22,7 @@ from barrage.colorize import (
     should_colorize,
     style,
 )
+from barrage.environ import _EnvironContext, isolated_environ
 from barrage.result import AsyncTestResult, Outcome, TestOutcome
 from barrage.singleton import SingletonManager, discover_singletons
 
@@ -511,6 +512,9 @@ async def _run_single_test(
         if progress is not None:
             await progress.test_started(instance.id(), str(instance))
 
+        # ── per-test environment snapshot ─────────────────────────
+        stack.enter_context(isolated_environ())
+
         # ── optional output capture ──────────────────────────────
         captured = stack.enter_context(_capture_output()) if capture else None
 
@@ -741,106 +745,115 @@ async def _run_class(
     elif progress is not None:
         await progress.class_started(cls.__qualname__)
 
-    # setUpClass – capture stdout/stderr so that background tasks
-    # spawned here (e.g. MonitoredTestCase.monitor_async_context) inherit
-    # the capture context-var and don't leak output to the terminal.
-    with _capture_output() if capture else contextlib.nullcontext() as setup_captured:
-        try:
-            await cls.setUpClass()
-        except SkipTest as exc:
-            if progress is not None:
-                await progress.class_setup_finished(cls.__qualname__)
-            for name in method_names:
-                instance = cls(name)
-                recorded = await result.add_skip(instance, exc.reason)
-                if interactive_stream is not None:
-                    _interactive_line(
-                        interactive_stream, instance, Outcome.SKIPPED, 0.0, exc.reason, colorize=colorize
-                    )
-                if progress is not None:
-                    await progress.test_finished(recorded)
-            return
-        except Exception as exc:
-            if progress is not None:
-                await progress.class_setup_finished(cls.__qualname__)
-            stdout = setup_captured.stdout if setup_captured else ""
-            stderr = setup_captured.stderr if setup_captured else ""
-            # If setUpClass fails, record an error for each test and skip them.
-            tb = capture_excepthook(type(exc), exc, exc.__traceback__, colorize=colorize)
-            for name in method_names:
-                instance = cls(name)
-                recorded = await result.add_error(
-                    instance, exc, 0.0, stdout=stdout, stderr=stderr, traceback_str=tb
-                )
-                if interactive_stream is not None:
-                    _interactive_line(interactive_stream, instance, Outcome.ERRORED, 0.0, colorize=colorize)
-                    _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
-                if progress is not None:
-                    await progress.test_finished(recorded)
-            return
-
-        if progress is not None:
-            await progress.class_setup_finished(cls.__qualname__)
-        # setUpClass succeeded – stop capturing its direct output but
-        # leave the buffers alive: background tasks that were spawned
-        # during setUpClass already copied the context-var pointing at
-        # these buffers, so they will keep writing there instead of to
-        # the real stream.
-
-    try:
-        concurrent = cls.__concurrent__ and interactive_stream is None
-        if concurrent:
-            # Run all test methods concurrently
-            async with asyncio.TaskGroup() as tg:
-                for name in method_names:
-                    tg.create_task(
-                        _run_single_test(
-                            cls,
-                            name,
-                            result,
-                            semaphore,
-                            capture=capture,
-                            colorize=colorize,
-                            interactive_stream=interactive_stream,
-                            progress=progress,
-                            failfast=failfast,
-                        ),
-                        name=f"{cls.__qualname__}.{name}",
-                    )
-        else:
-            # Run test methods sequentially (in sorted order)
-            for name in method_names:
-                await _run_single_test(
-                    cls,
-                    name,
-                    result,
-                    semaphore,
-                    capture=capture,
-                    colorize=colorize,
-                    interactive_stream=interactive_stream,
-                    progress=progress,
-                    failfast=failfast,
-                )
-    finally:
-        # tearDownClass – always attempt it, with output capture.
-        with _capture_output() if capture else contextlib.nullcontext() as teardown_captured:
+    # Per-class environment snapshot — mutations in setUpClass,
+    # singletons, and tearDownClass are visible to all tests in this
+    # class.  Each test takes its own copy of this class-level
+    # snapshot via the per-test isolated_environ() in _run_single_test.
+    with isolated_environ():
+        # setUpClass – capture stdout/stderr so that background tasks
+        # spawned here (e.g. MonitoredTestCase.monitor_async_context) inherit
+        # the capture context-var and don't leak output to the terminal.
+        with _capture_output() if capture else contextlib.nullcontext() as setup_captured:
             try:
-                await cls.tearDownClass()
-            except Exception as exc:
-                stdout = teardown_captured.stdout if teardown_captured else ""
-                stderr = teardown_captured.stderr if teardown_captured else ""
-                # Record the tearDownClass failure against a synthetic test id
-                tb = capture_excepthook(type(exc), exc, exc.__traceback__, colorize=colorize)
-                instance = cls("tearDownClass")
-                instance._test_method_name = "tearDownClass"
-                recorded = await result.add_error(
-                    instance, exc, 0.0, stdout=stdout, stderr=stderr, traceback_str=tb
-                )
-                if interactive_stream is not None:
-                    _interactive_line(interactive_stream, instance, Outcome.ERRORED, 0.0, colorize=colorize)
-                    _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
+                await cls.setUpClass()
+            except SkipTest as exc:
                 if progress is not None:
-                    await progress.test_finished(recorded)
+                    await progress.class_setup_finished(cls.__qualname__)
+                for name in method_names:
+                    instance = cls(name)
+                    recorded = await result.add_skip(instance, exc.reason)
+                    if interactive_stream is not None:
+                        _interactive_line(
+                            interactive_stream, instance, Outcome.SKIPPED, 0.0, exc.reason, colorize=colorize
+                        )
+                    if progress is not None:
+                        await progress.test_finished(recorded)
+                return
+            except Exception as exc:
+                if progress is not None:
+                    await progress.class_setup_finished(cls.__qualname__)
+                stdout = setup_captured.stdout if setup_captured else ""
+                stderr = setup_captured.stderr if setup_captured else ""
+                # If setUpClass fails, record an error for each test and skip them.
+                tb = capture_excepthook(type(exc), exc, exc.__traceback__, colorize=colorize)
+                for name in method_names:
+                    instance = cls(name)
+                    recorded = await result.add_error(
+                        instance, exc, 0.0, stdout=stdout, stderr=stderr, traceback_str=tb
+                    )
+                    if interactive_stream is not None:
+                        _interactive_line(
+                            interactive_stream, instance, Outcome.ERRORED, 0.0, colorize=colorize
+                        )
+                        _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
+                    if progress is not None:
+                        await progress.test_finished(recorded)
+                return
+
+            if progress is not None:
+                await progress.class_setup_finished(cls.__qualname__)
+            # setUpClass succeeded – stop capturing its direct output but
+            # leave the buffers alive: background tasks that were spawned
+            # during setUpClass already copied the context-var pointing at
+            # these buffers, so they will keep writing there instead of to
+            # the real stream.
+
+        try:
+            concurrent = cls.__concurrent__ and interactive_stream is None
+            if concurrent:
+                # Run all test methods concurrently
+                async with asyncio.TaskGroup() as tg:
+                    for name in method_names:
+                        tg.create_task(
+                            _run_single_test(
+                                cls,
+                                name,
+                                result,
+                                semaphore,
+                                capture=capture,
+                                colorize=colorize,
+                                interactive_stream=interactive_stream,
+                                progress=progress,
+                                failfast=failfast,
+                            ),
+                            name=f"{cls.__qualname__}.{name}",
+                        )
+            else:
+                # Run test methods sequentially (in sorted order)
+                for name in method_names:
+                    await _run_single_test(
+                        cls,
+                        name,
+                        result,
+                        semaphore,
+                        capture=capture,
+                        colorize=colorize,
+                        interactive_stream=interactive_stream,
+                        progress=progress,
+                        failfast=failfast,
+                    )
+        finally:
+            # tearDownClass – always attempt it, with output capture.
+            with _capture_output() if capture else contextlib.nullcontext() as teardown_captured:
+                try:
+                    await cls.tearDownClass()
+                except Exception as exc:
+                    stdout = teardown_captured.stdout if teardown_captured else ""
+                    stderr = teardown_captured.stderr if teardown_captured else ""
+                    # Record the tearDownClass failure against a synthetic test id
+                    tb = capture_excepthook(type(exc), exc, exc.__traceback__, colorize=colorize)
+                    instance = cls("tearDownClass")
+                    instance._test_method_name = "tearDownClass"
+                    recorded = await result.add_error(
+                        instance, exc, 0.0, stdout=stdout, stderr=stderr, traceback_str=tb
+                    )
+                    if interactive_stream is not None:
+                        _interactive_line(
+                            interactive_stream, instance, Outcome.ERRORED, 0.0, colorize=colorize
+                        )
+                        _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
+                    if progress is not None:
+                        await progress.test_finished(recorded)
 
 
 # ===================================================================== #
@@ -1060,6 +1073,8 @@ class AsyncTestRunner:
         real_stdout = sys.stdout
 
         async with contextlib.AsyncExitStack() as suite_stack:
+            suite_stack.enter_context(_EnvironContext())
+            suite_stack.enter_context(isolated_environ())
             if capture:
                 suite_stack.enter_context(_CaptureContext())
 

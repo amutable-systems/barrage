@@ -235,7 +235,7 @@ async def spawn(
             stdin=stdin,
             stdout=real_stdout,
             stderr=real_stderr,
-            env=env,
+            env=env if env is not None else dict(os.environ),
             cwd=cwd,
         )
 
