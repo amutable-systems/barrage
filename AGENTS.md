@@ -13,7 +13,7 @@ All commands must be run via `mkosi box`, e.g. `mkosi box -- just check`.
 - **Check (format, lint, spell, type-check):** `mkosi box -- just check`
 - **Auto-format:** `mkosi box -- just fmt`
 - **Run all tests:** `mkosi box -- just test`
-- **Run specific tests:** `mkosi box -- just test tests/test_framework.py` or `mkosi box -- just test tests/test_framework.py::TestClassName::test_method`
+- **Run specific tests:** `mkosi box -- python3 -m barrage tests/test_framework.py` or `mkosi box -- python3 -m barrage tests/test_framework.py::TestClassName::test_method`
 - **Run mypy only:** `mkosi box -- mypy ./barrage ./tests`
 
 ## Architecture
