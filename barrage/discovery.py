@@ -14,6 +14,7 @@ from barrage.runner import AsyncTestSuite, _collect_test_methods
 def resolve_tests(
     path_specs: list[str],
     pattern: str = "test_*.py",
+    top_level_dir: str | None = None,
 ) -> AsyncTestSuite:
     """
     Build an :class:`AsyncTestSuite` from a list of path specifications.
@@ -40,6 +41,11 @@ def resolve_tests(
     pattern:
         Glob pattern for test file names used during directory
         discovery (default ``test_*.py``).
+    top_level_dir:
+        Top-level directory of the project, used as the import root
+        for discovered modules.  When ``None``, directory discovery
+        uses *start_dir* and file discovery uses the current working
+        directory.
 
     Returns
     -------
@@ -54,6 +60,7 @@ def resolve_tests(
         ``SystemExit(2)`` is raised.
     """
     suite = AsyncTestSuite()
+    top = Path(top_level_dir) if top_level_dir else None
 
     for spec in path_specs:
         parts = spec.split("::")
@@ -70,6 +77,14 @@ def resolve_tests(
 
         p = Path(path_str)
 
+        # When a top-level directory is set and the path is not
+        # absolute, resolve it relative to that directory so that
+        # ``-t test test_file.py::Class`` finds ``test/test_file.py``.
+        if top and not p.is_absolute() and not p.exists():
+            candidate = top / p
+            if candidate.exists():
+                p = candidate
+
         if p.is_dir():
             if class_name is not None:
                 print(
@@ -77,7 +92,7 @@ def resolve_tests(
                     file=sys.stderr,
                 )
                 raise SystemExit(2)
-            _discover_directory(p, suite, pattern=pattern)
+            _discover_directory(p, suite, pattern=pattern, top_level_dir=top)
 
         elif p.is_file():
             _discover_file(
@@ -85,6 +100,7 @@ def resolve_tests(
                 suite,
                 class_name=class_name,
                 method_name=method_name,
+                top_level_dir=top,
             )
 
         else:
@@ -176,6 +192,7 @@ def _discover_file(
     suite: AsyncTestSuite,
     class_name: str | None = None,
     method_name: str | None = None,
+    top_level_dir: Path | None = None,
 ) -> None:
     """Import *filepath* and add matching test classes/methods to *suite*.
 
@@ -189,12 +206,16 @@ def _discover_file(
         If given, only the class with this name is collected.
     method_name:
         If given (requires *class_name*), only this method is collected.
+    top_level_dir:
+        Top-level directory used as the import root.  When ``None``,
+        the current working directory is used.
     """
     filepath = filepath.resolve()
 
-    # Use the current working directory as the top-level import root so
-    # that ``test/test_foo.py`` imports as ``test.test_foo``.
-    top = Path.cwd().resolve()
+    # Use the provided top-level directory or fall back to the current
+    # working directory as the import root so that ``test/test_foo.py``
+    # imports as ``test.test_foo``.
+    top = top_level_dir.resolve() if top_level_dir else Path.cwd().resolve()
     if str(top) not in sys.path:
         sys.path.insert(0, str(top))
 
