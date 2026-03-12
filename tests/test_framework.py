@@ -1287,6 +1287,65 @@ class TestResolveTests(AsyncTestCase, concurrent=True):
         assert isinstance(ctx.exception, SystemExit)
         self.assertEqual(ctx.exception.code, 2)
 
+    # ── top_level_dir ─────────────────────────────────────────────────
+
+    async def test_resolve_top_level_dir_discovers_directory(self) -> None:
+        """``top_level_dir`` used as discovery root when passed as path."""
+        suite = resolve_tests([self._sample_dir], top_level_dir=self._sample_dir)
+        class_names = sorted(cls.__name__ for cls, _ in suite.entries)
+        self.assertIn("SamplePassingTests", class_names)
+        self.assertIn("SampleSequentialTests", class_names)
+        total_methods = sum(len(m) for _, m in suite.entries)
+        self.assertEqual(total_methods, 4)
+
+    async def test_resolve_top_level_dir_relative_file(self) -> None:
+        """A relative file path is resolved against ``top_level_dir``."""
+        suite = resolve_tests(["test_sample.py"], top_level_dir=self._sample_dir)
+        class_names = sorted(cls.__name__ for cls, _ in suite.entries)
+        self.assertIn("SamplePassingTests", class_names)
+        self.assertIn("SampleSequentialTests", class_names)
+
+    async def test_resolve_top_level_dir_relative_file_with_class(self) -> None:
+        """A relative ``file::Class`` spec is resolved against ``top_level_dir``."""
+        suite = resolve_tests(
+            ["test_sample.py::SamplePassingTests"],
+            top_level_dir=self._sample_dir,
+        )
+        self.assertEqual(len(suite.entries), 1)
+        cls, methods = suite.entries[0]
+        self.assertEqual(cls.__name__, "SamplePassingTests")
+        self.assertEqual(len(methods), 2)
+
+    async def test_resolve_top_level_dir_relative_file_with_method(self) -> None:
+        """A relative ``file::Class::method`` spec is resolved against ``top_level_dir``."""
+        suite = resolve_tests(
+            ["test_sample.py::SamplePassingTests::test_add"],
+            top_level_dir=self._sample_dir,
+        )
+        self.assertEqual(len(suite.entries), 1)
+        cls, methods = suite.entries[0]
+        self.assertEqual(cls.__name__, "SamplePassingTests")
+        self.assertEqual(methods, ["test_add"])
+
+    async def test_resolve_top_level_dir_absolute_path_ignores_top(self) -> None:
+        """An absolute path is not resolved against ``top_level_dir``."""
+        suite = resolve_tests(
+            [self._sample_file],
+            top_level_dir="/tmp/_barrage_no_such_dir_99999",
+        )
+        class_names = sorted(cls.__name__ for cls, _ in suite.entries)
+        self.assertIn("SamplePassingTests", class_names)
+
+    async def test_resolve_top_level_dir_relative_not_found(self) -> None:
+        """A relative path that doesn't exist in either cwd or top dir gives SystemExit(2)."""
+        with self.assertRaises(SystemExit) as ctx:
+            resolve_tests(
+                ["no_such_file_99999.py"],
+                top_level_dir=self._sample_dir,
+            )
+        assert isinstance(ctx.exception, SystemExit)
+        self.assertEqual(ctx.exception.code, 2)
+
 
 # ===================================================================== #
 #  17. CLI (__main__) via subprocess
@@ -1420,6 +1479,168 @@ class TestCLI(AsyncTestCase, concurrent=True):
             )
         self.assertEqual(result.returncode, 2)
         self.assertIn("no_such_method", result.stderr.decode())
+
+    async def test_top_level_directory_discovers_tests(self) -> None:
+        """``-t dir`` with no positional paths discovers tests in that directory."""
+        sample_dir = str(Path(__file__).parent / "_sample_discover")
+        top_dir = str(Path(__file__).resolve().parents[1])
+
+        if not Path(sample_dir).is_dir():
+            self.skipTest("sample directory missing")
+
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", "-t", sample_dir, "-v"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        stdout_text = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
+        self.assertIn("Ran 4 test(s)", stdout_text)
+        self.assertIn("OK", stdout_text)
+
+    async def test_top_level_directory_resolves_relative_path(self) -> None:
+        """``-t dir file.py`` resolves the relative path against -t."""
+        sample_dir = str(Path(__file__).parent / "_sample_discover")
+        top_dir = str(Path(__file__).resolve().parents[1])
+
+        if not Path(sample_dir).is_dir():
+            self.skipTest("sample directory missing")
+
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", "-t", sample_dir, "test_sample.py", "-v"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        stdout_text = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
+        self.assertIn("Ran 4 test(s)", stdout_text)
+        self.assertIn("OK", stdout_text)
+
+    async def test_top_level_directory_with_class_selector(self) -> None:
+        """``-t dir file.py::Class`` resolves the file and selects the class."""
+        sample_dir = str(Path(__file__).parent / "_sample_discover")
+        top_dir = str(Path(__file__).resolve().parents[1])
+
+        if not Path(sample_dir).is_dir():
+            self.skipTest("sample directory missing")
+
+        async with asyncio.timeout(30):
+            result = await run(
+                [
+                    sys.executable,
+                    "-m",
+                    "barrage",
+                    "-t",
+                    sample_dir,
+                    "test_sample.py::SamplePassingTests",
+                    "-v",
+                ],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        stdout_text = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
+        self.assertIn("Ran 2 test(s)", stdout_text)
+        self.assertIn("OK", stdout_text)
+
+    async def test_top_level_directory_with_method_selector(self) -> None:
+        """``-t dir file.py::Class::method`` resolves and selects a single test."""
+        sample_dir = str(Path(__file__).parent / "_sample_discover")
+        top_dir = str(Path(__file__).resolve().parents[1])
+
+        if not Path(sample_dir).is_dir():
+            self.skipTest("sample directory missing")
+
+        async with asyncio.timeout(30):
+            result = await run(
+                [
+                    sys.executable,
+                    "-m",
+                    "barrage",
+                    "-t",
+                    sample_dir,
+                    "test_sample.py::SamplePassingTests::test_add",
+                    "-v",
+                ],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        stdout_text = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
+        self.assertIn("Ran 1 test(s)", stdout_text)
+        self.assertIn("test_add", stdout_text)
+        self.assertIn("OK", stdout_text)
+
+    async def test_top_level_directory_nonexistent_exits_2(self) -> None:
+        """``-t /nonexistent`` with no positional paths exits with code 2."""
+        top_dir = str(Path(__file__).resolve().parents[1])
+
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", "-t", "/tmp/_barrage_no_such_dir_99999"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 2)
+
+    async def test_top_level_directory_long_form(self) -> None:
+        """The long form ``--top-level-directory`` works the same as ``-t``."""
+        sample_dir = str(Path(__file__).parent / "_sample_discover")
+        top_dir = str(Path(__file__).resolve().parents[1])
+
+        if not Path(sample_dir).is_dir():
+            self.skipTest("sample directory missing")
+
+        async with asyncio.timeout(30):
+            result = await run(
+                [sys.executable, "-m", "barrage", "--top-level-directory", sample_dir, "-v"],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        stdout_text = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
+        self.assertIn("Ran 4 test(s)", stdout_text)
+        self.assertIn("OK", stdout_text)
+
+    async def test_top_level_directory_with_absolute_path(self) -> None:
+        """``-t`` does not interfere when positional paths are absolute."""
+        sample_file = str(Path(__file__).parent / "_sample_discover" / "test_sample.py")
+        top_dir = str(Path(__file__).resolve().parents[1])
+
+        async with asyncio.timeout(30):
+            result = await run(
+                [
+                    sys.executable,
+                    "-m",
+                    "barrage",
+                    "-t",
+                    "/tmp/_barrage_no_such_dir_99999",
+                    sample_file,
+                    "-v",
+                ],
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=top_dir,
+                check=False,
+            )
+        stdout_text = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
+        self.assertIn("Ran 4 test(s)", stdout_text)
+        self.assertIn("OK", stdout_text)
 
 
 # ===================================================================== #

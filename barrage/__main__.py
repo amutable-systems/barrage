@@ -27,6 +27,10 @@ Usage::
     python3 -m barrage --max-concurrency 4 test/
     python3 -m barrage -i test/test_example.py::MyTestClass::test_method
     python3 -m barrage -x test/
+
+    # Set a test directory (used as default search dir and import root)
+    python3 -m barrage -t tests/
+    python3 -m barrage --top-level-directory tests/ test_foo.py::MyClass::test_method
 """
 
 import argparse
@@ -101,22 +105,39 @@ def main(argv: list[str] | None = None) -> int:
         help="Pattern to match test files when discovering in directories (default: test_*.py)",
     )
     parser.add_argument(
+        "-t",
+        "--top-level-directory",
+        default=None,
+        dest="top_level_directory",
+        metavar="DIR",
+        help=(
+            "Top-level directory for test discovery and imports.  "
+            "When no positional paths are given, tests are discovered "
+            "in this directory instead of the current directory.  "
+            "When paths are given, relative paths are resolved against "
+            "this directory and it is used as the import root."
+        ),
+    )
+    parser.add_argument(
         "paths",
         nargs="*",
-        default=["."],
+        default=None,
         metavar="path",
         help=(
             "Paths to test files or directories.  A path may be suffixed "
             "with ::ClassName to select a single test class, or "
             "::ClassName::test_method to select a single test.  "
             "When no paths are given, discovers tests in the current "
-            "directory."
+            "directory (or -t if set)."
         ),
     )
 
     args = parser.parse_args(argv)
 
-    suite = resolve_tests(args.paths, pattern=args.pattern)
+    paths = args.paths if args.paths else [args.top_level_directory or "."]
+    top_level_dir = args.top_level_directory
+
+    suite = resolve_tests(paths, pattern=args.pattern, top_level_dir=top_level_dir)
 
     if not suite.entries:
         print("No tests discovered.", file=sys.stderr)
