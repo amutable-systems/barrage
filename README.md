@@ -48,8 +48,9 @@ python3 -m barrage [options] [path ...]
 | `-x`, `--failfast` | Stop on the first test failure or error. |
 
 Paths may be suffixed with `::ClassName` to select a single test
-class, or `::ClassName::test_method` to select a single test. When
-no paths are given, tests are discovered in the current directory.
+class, `::ClassName::test_method` to select a single test method,
+or `::function_name` to select a standalone test function. When no
+paths are given, tests are discovered in the current directory.
 
 ```console
 # Discover and run all tests in the current directory
@@ -66,6 +67,9 @@ $ python3 -m barrage test/test_example.py::MyTestClass
 
 # Run a single test method
 $ python3 -m barrage test/test_example.py::MyTestClass::test_method
+
+# Run a single standalone test function
+$ python3 -m barrage test/test_example.py::test_function_name
 
 # Multiple paths at once
 $ python3 -m barrage test/test_foo.py test/test_bar.py::SomeClass
@@ -100,6 +104,57 @@ isolated between tests.
 `assertLessEqual`, `assertAlmostEqual`, `assertRaises`, `fail`
 
 **Skip support** — call `self.skipTest("reason")` to skip a test.
+
+### Standalone test functions
+
+Tests can also be written as top-level `async def test_*` functions
+— no class required:
+
+```python
+async def test_addition() -> None:
+    assert 1 + 1 == 2
+```
+
+Function tests are discovered alongside class-based tests and run
+concurrently.
+
+#### Assertions
+
+Class methods have `self.assertEqual`, `self.assertIn`, etc.
+Standalone functions use the `barrage.assertions` module instead:
+
+```python
+import barrage.assertions as Assert
+
+async def test_example() -> None:
+    Assert.eq(1 + 1, 2)
+    Assert.in_("hello", ["hello", "world"])
+    Assert.gt(10, 5)
+    with Assert.raises(ValueError):
+        int("bad")
+```
+
+| Function | Checks |
+|---|---|
+| `eq(a, b)` | `a == b` |
+| `ne(a, b)` | `a != b` |
+| `gt(a, b)` | `a > b` |
+| `ge(a, b)` | `a >= b` |
+| `lt(a, b)` | `a < b` |
+| `le(a, b)` | `a <= b` |
+| `is_(a, b)` | `a is b` |
+| `is_not(a, b)` | `a is not b` |
+| `none(x)` | `x is None` |
+| `not_none(x)` | `x is not None` |
+| `in_(x, c)` | `x in c` |
+| `not_in(x, c)` | `x not in c` |
+| `true(x)` | truthy |
+| `false(x)` | falsy |
+| `isinstance_(x, T)` | `isinstance(x, T)` |
+| `almost_eq(a, b)` | float comparison |
+| `raises(E)` | context manager |
+| `fail(msg)` | unconditional failure |
+| `skip(reason)` | skip the test |
 
 ### Concurrency model
 
@@ -220,15 +275,18 @@ A *singleton* is a resource that is expensive to create and tear down
 should be shared across many test classes.
 
 Singletons are declared as classes that inherit from `Singleton` and
-implement the async context manager protocol. They are attached to
-test classes using the `singleton` descriptor. The framework creates
-each singleton once, injects it before `setUpClass`, and tears
+implement the async context manager protocol. The framework creates
+each singleton once, injects it before tests run, and tears
 everything down in reverse order when the test session ends.
+
+For plain (non-parameterised) singletons, a bare **type annotation**
+is all you need — the framework detects `Singleton` subclasses
+automatically:
 
 ```python
 from typing import Self
 
-from barrage import AsyncTestCase, Singleton, singleton
+from barrage import AsyncTestCase, Singleton
 
 class VMManager(Singleton):
     async def __aenter__(self) -> Self:
@@ -238,13 +296,29 @@ class VMManager(Singleton):
     async def __aexit__(self, *exc: object) -> None:
         await self.pool.shutdown()
 
+# On classes — just annotate:
 class MyTests(AsyncTestCase):
-    manager = singleton(VMManager)
+    manager: VMManager
 
     async def test_something(self) -> None:
         vm = await self.manager.acquire()
         result = await vm.run("uname -r")
         self.assertIn("6.", result)
+
+# On standalone functions — same:
+async def test_something(manager: VMManager) -> None:
+    vm = await manager.acquire()
+    ...
+```
+
+Use `singleton()` explicitly only when you need keyword arguments
+(see [Parameterised singletons](#parameterised-singletons)):
+
+```python
+from barrage import singleton
+
+class MyTests(AsyncTestCase):
+    db = singleton(Database, url="postgres://localhost/test")
 ```
 
 ### Default `__aexit__` behaviour
@@ -257,9 +331,9 @@ Override `__aexit__` when you need custom cleanup logic.
 ### Dependency injection
 
 Dependencies between singletons are declared using the same
-`singleton` descriptor. If singleton A has a `singleton(B)` descriptor,
-B is created and injected first. Circular dependencies are detected
-and raise `RuntimeError`.
+mechanisms — type annotations or `singleton()`. If singleton A
+depends on B, B is created and injected first. Circular dependencies
+are detected and raise `RuntimeError`.
 
 ```python
 class ResourceMonitor(Singleton):
@@ -267,14 +341,15 @@ class ResourceMonitor(Singleton):
         ...
 
 class VMManager(Singleton):
-    monitor = singleton(ResourceMonitor)
+    monitor: ResourceMonitor
 
     async def __aenter__(self) -> Self:
+        # self.monitor is available here
         ...
 
 class MyTests(AsyncTestCase):
-    monitor = singleton(ResourceMonitor)
-    manager = singleton(VMManager)  # ResourceMonitor is created first
+    monitor: ResourceMonitor
+    manager: VMManager  # ResourceMonitor is created first
 ```
 
 Multiple test classes that reference the same singleton class share a
@@ -302,8 +377,9 @@ class Database(Singleton):
         await self.conn.close()
 ```
 
-Create named configurations using the class keyword syntax (fully
-statically typed):
+Create named configurations using the class keyword syntax. Since
+the result is a `Singleton` subclass, annotation-based injection
+works:
 
 ```python
 class TestDB(Database, url="postgres://localhost/test"):
@@ -313,11 +389,15 @@ class StagingDB(Database, url="postgres://staging/app"):
     pass
 
 class SchemaTests(AsyncTestCase):
-    db = singleton(TestDB)
+    db: TestDB
 
 class MigrationTests(AsyncTestCase):
-    test_db = singleton(TestDB)       # same instance as SchemaTests.db
-    staging_db = singleton(StagingDB) # separate instance
+    test_db: TestDB       # same instance as SchemaTests.db
+    staging_db: StagingDB # separate instance
+
+# Works on functions too:
+async def test_schema(db: TestDB) -> None:
+    ...
 ```
 
 Or pass keyword arguments directly to `singleton()` for a more

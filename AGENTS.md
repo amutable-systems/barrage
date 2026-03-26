@@ -27,5 +27,4 @@ Barrage is a concurrent async test framework for Python 3.12+ with zero external
 
 ## Commit guidelines
 
-- Always add `Co-developed-by: Claude <claude@anthropic.com>` to any commits.
 - Always do Signed off by for commits

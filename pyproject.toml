@@ -68,6 +68,11 @@ lint.select = [
     "UP",   # pypgrade
     "B"     # flake8-bugbear
 ]
+# singleton() is designed to be used as a default parameter value for
+# function-based test injection, so B008 is a false positive here.
+lint.flake8-bugbear.extend-immutable-calls = [
+    "barrage.singleton.singleton",
+]
 
 [tool.ty.rules]
 unused-type-ignore-comment = "ignore"

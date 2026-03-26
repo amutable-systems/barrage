@@ -257,20 +257,22 @@ def colored_overview(
 ) -> str:
     """Format the pre-run overview showing how many tests will be run.
 
-    *entries* is a list of ``(class_name, n_methods)`` pairs.
-    *total_tests* is the total number of test methods across all classes.
+    *entries* is a list of ``(name, n_tests)`` pairs — typically class
+    names with their method counts, but may also include a standalone
+    function summary entry.
+    *total_tests* is the total number of tests across all entries.
 
     Returns a multi-line string like::
 
-        Collected 5 test(s) from 2 class(es)
+        Collected 5 test(s) from 2 source(s)
 
           SharedVMSmokeTests (2 tests)
           OtherTests (3 tests)
     """
-    n_classes = len(entries)
+    n_sources = len(entries)
     buf: list[str] = []
 
-    header = f"Collected {total_tests} test(s) from {n_classes} class(es)"
+    header = f"Collected {total_tests} test(s) from {n_sources} source(s)"
     if color:
         header = style(header, ANSI.BOLD)
     buf.append(header)

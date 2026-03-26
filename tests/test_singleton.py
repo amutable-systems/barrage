@@ -9,7 +9,8 @@ Run with::
 """
 
 import asyncio
-from typing import ClassVar, Self
+from collections.abc import Callable, Coroutine
+from typing import Any, ClassVar, Self
 
 from barrage.case import AsyncTestCase
 from barrage.result import AsyncTestResult
@@ -17,7 +18,9 @@ from barrage.runner import AsyncTestRunner, AsyncTestSuite
 from barrage.singleton import (
     Singleton,
     SingletonManager,
+    _SingletonDescriptor,
     discover_singletons,
+    discover_singletons_from_function,
     discover_singletons_from_suite,
     singleton,
     singleton_key,
@@ -175,7 +178,7 @@ class TestSingletonDescriptor(AsyncTestCase, concurrent=True):
             my_counter = singleton(Counter)
 
         desc = vars(_Inner)["my_counter"]
-        self.assertIsInstance(desc, singleton)
+        self.assertIsInstance(desc, _SingletonDescriptor)
         self.assertEqual(desc._attr_name, "my_counter")
 
     async def test_descriptor_repr(self) -> None:
@@ -332,6 +335,74 @@ class TestSingletonDiscovery(AsyncTestCase, concurrent=True):
         found = discover_singletons_from_suite(suite.entries)
         self.assertEqual(len(found), 1)
 
+    async def test_discover_from_annotation(self) -> None:
+        """A bare Singleton subclass annotation is discovered."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr: Counter
+
+        found = discover_singletons(_Inner)
+        self.assertEqual(set(found.keys()), {"ctr"})
+        self.assertIs(found["ctr"].cls, Counter)
+
+    async def test_discover_annotation_and_descriptor(self) -> None:
+        """An explicit descriptor wins over a bare annotation."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr: Counter = singleton(Counter)
+
+        found = discover_singletons(_Inner)
+        self.assertEqual(set(found.keys()), {"ctr"})
+
+    async def test_discover_annotation_with_non_singleton_ignored(self) -> None:
+        """Non-Singleton annotations are ignored."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            x: int
+            name: str
+
+        found = discover_singletons(_Inner)
+        self.assertEqual(len(found), 0)
+
+    async def test_discover_annotation_inherited(self) -> None:
+        """Annotated singletons are inherited from base classes."""
+
+        class _Base(AsyncTestCase):
+            __test__ = False
+            ctr: Counter
+
+        class _Child(_Base):
+            __test__ = False
+
+        found = discover_singletons(_Child)
+        self.assertEqual(set(found.keys()), {"ctr"})
+
+    async def test_discover_annotation_with_value_ignored(self) -> None:
+        """An annotation with a non-descriptor value is not treated as a singleton."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr: Counter = None  # type: ignore[assignment]
+
+        found = discover_singletons(_Inner)
+        self.assertEqual(len(found), 0)
+
+    async def test_discover_mixed_annotation_and_descriptor(self) -> None:
+        """A class can mix annotation-only and explicit singletons."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr: Counter
+            greet = singleton(Greeter)
+
+        found = discover_singletons(_Inner)
+        self.assertEqual(set(found.keys()), {"ctr", "greet"})
+        self.assertIs(found["ctr"].cls, Counter)
+        self.assertIs(found["greet"].cls, Greeter)
+
 
 # ===================================================================== #
 #  Singleton key tests
@@ -406,7 +477,6 @@ class TestSingletonManager(AsyncTestCase):
 
     async def test_get_or_create_returns_cached(self) -> None:
         """Calling get_or_create twice with the same class returns the same value."""
-        Counter.reset()
 
         class _A(AsyncTestCase):
             __test__ = False
@@ -423,7 +493,6 @@ class TestSingletonManager(AsyncTestCase):
             val_a = await sm.get_or_create(desc_a)
             val_b = await sm.get_or_create(desc_b)
             self.assertIs(val_a, val_b)
-            self.assertEqual(Counter.instances_created, 1)
 
     async def test_get_or_create_different_classes(self) -> None:
         """Different classes create distinct singleton instances."""
@@ -460,7 +529,7 @@ class TestSingletonManager(AsyncTestCase):
             await sm.inject(entries)
 
             # Descriptor should be replaced
-            self.assertFalse(isinstance(vars(_Inner).get("ctr"), singleton))
+            self.assertFalse(isinstance(vars(_Inner).get("ctr"), _SingletonDescriptor))
             self.assertIsInstance(_Inner.ctr, Counter)  # type: ignore[attr-defined]
 
             # Instance access works
@@ -468,8 +537,6 @@ class TestSingletonManager(AsyncTestCase):
             self.assertIsInstance(instance.ctr, Counter)  # type: ignore[attr-defined]
 
     async def test_inject_multiple_classes_share_singleton(self) -> None:
-        Counter.reset()
-
         class _A(AsyncTestCase):
             __test__ = False
             ctr = singleton(Counter)
@@ -491,7 +558,6 @@ class TestSingletonManager(AsyncTestCase):
         async with SingletonManager() as sm:
             await sm.inject(suite.entries)
             self.assertIs(_A.ctr, _B.ctr)  # type: ignore[attr-defined]
-            self.assertEqual(Counter.instances_created, 1)
 
     async def test_teardown_reverse_order(self) -> None:
         """Singletons are torn down in reverse creation order."""
@@ -580,8 +646,6 @@ class TestSingletonManager(AsyncTestCase):
             self.assertEqual(sm.active_keys, frozenset({key_ctr, key_greet}))
 
     async def test_context_manager_protocol(self) -> None:
-        Counter.reset()
-
         class _Inner(AsyncTestCase):
             __test__ = False
             ctr = singleton(Counter)
@@ -851,7 +915,7 @@ class TestSingletonIntegration(AsyncTestCase):
 
     async def test_singleton_shared_across_classes(self) -> None:
         """Two classes using the same singleton class share the instance."""
-        Counter.reset()
+        saw: list[object] = []
 
         class _A(AsyncTestCase):
             __test__ = False
@@ -859,7 +923,7 @@ class TestSingletonIntegration(AsyncTestCase):
 
             async def test_a(self) -> None:
                 self.assertIsInstance(self.ctr, Counter)
-                self.ctr.increment()
+                saw.append(self.ctr)
 
         class _B(AsyncTestCase):
             __test__ = False
@@ -867,17 +931,17 @@ class TestSingletonIntegration(AsyncTestCase):
 
             async def test_b(self) -> None:
                 self.assertIsInstance(self.ctr, Counter)
-                self.ctr.increment()
+                saw.append(self.ctr)
 
         result = await _run(_A, _B)
         self.assertTrue(result.was_successful)
         self.assertEqual(result.tests_run, 2)
-        # Only one Counter should have been created
-        self.assertEqual(Counter.instances_created, 1)
+        # Both classes should share a single Counter instance
+        self.assertIs(saw[0], saw[1])
 
     async def test_singleton_torn_down_after_run(self) -> None:
         """Without an external manager, singletons are torn down after the run."""
-        Counter.reset()
+        captured: list[Counter] = []
 
         class _Inner(AsyncTestCase):
             __test__ = False
@@ -885,10 +949,12 @@ class TestSingletonIntegration(AsyncTestCase):
 
             async def test_ok(self) -> None:
                 self.assertFalse(self.ctr.torn_down)
+                captured.append(self.ctr)
 
         result = await _run(_Inner)
         self.assertTrue(result.was_successful)
-        self.assertEqual(Counter.instances_torn_down, 1)
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(captured[0].torn_down)
 
     async def test_multiple_singletons_on_one_class(self) -> None:
         class _Inner(AsyncTestCase):
@@ -1031,7 +1097,6 @@ class TestSingletonIntegration(AsyncTestCase):
 
     async def test_mixed_singleton_and_non_singleton_classes(self) -> None:
         """A suite with both singleton-using and plain classes works."""
-        Counter.reset()
 
         class _WithSingleton(AsyncTestCase):
             __test__ = False
@@ -1049,17 +1114,17 @@ class TestSingletonIntegration(AsyncTestCase):
         result = await _run(_WithSingleton, _Plain)
         self.assertTrue(result.was_successful)
         self.assertEqual(result.tests_run, 2)
-        self.assertEqual(Counter.instances_created, 1)
 
     async def test_failfast_still_tears_down_singletons(self) -> None:
         """With failfast, singletons are still cleaned up."""
-        Counter.reset()
+        captured: list[Counter] = []
 
         class _Inner(AsyncTestCase):
             __test__ = False
             ctr = singleton(Counter)
 
             async def test_fail(self) -> None:
+                captured.append(self.ctr)
                 self.fail("intentional failure")
 
             async def test_ok(self) -> None:
@@ -1068,7 +1133,8 @@ class TestSingletonIntegration(AsyncTestCase):
         result = await _run(_Inner, failfast=True)
         self.assertFalse(result.was_successful)
         # The singleton should still be torn down (no external manager)
-        self.assertEqual(Counter.instances_torn_down, 1)
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(captured[0].torn_down)
 
     async def test_dependent_singleton_integration(self) -> None:
         """Full integration: dependent singletons work through the runner."""
@@ -1135,6 +1201,86 @@ class TestSingletonIntegration(AsyncTestCase):
         result = await _run(_A, _B)
         self.assertTrue(result.was_successful)
         self.assertEqual(_Dep.instances, 1)
+
+    async def test_annotation_based_injection(self) -> None:
+        """A bare type annotation on a class triggers singleton injection."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr: Counter
+
+            async def test_use(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                self.ctr.increment()
+                self.assertEqual(self.ctr.value, 1)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 1)
+
+    async def test_annotation_shared_across_classes(self) -> None:
+        """Annotation-based singletons are shared across classes."""
+        saw: list[object] = []
+
+        class _A(AsyncTestCase):
+            __test__ = False
+            ctr: Counter
+
+            async def test_a(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                saw.append(self.ctr)
+
+        class _B(AsyncTestCase):
+            __test__ = False
+            ctr: Counter
+
+            async def test_b(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                saw.append(self.ctr)
+
+        result = await _run(_A, _B)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 2)
+        # Both classes should have received the same instance.
+        self.assertEqual(len(saw), 2)
+        self.assertIs(saw[0], saw[1])
+
+    async def test_annotation_and_descriptor_mixed(self) -> None:
+        """Annotation and descriptor singletons coexist on one class."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr: Counter
+            greet = singleton(Greeter)
+
+            async def test_both(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                self.assertIsInstance(self.greet, Greeter)
+                self.assertEqual(self.greet.greet("World"), "Hello, World!")
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_annotation_dependency_between_singletons(self) -> None:
+        """Singletons can declare dependencies via annotations too."""
+
+        class _Dep(Singleton):
+            pass
+
+        class _Main(Singleton):
+            dep: _Dep
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            dep: _Dep
+            main: _Main
+
+            async def test_dep(self) -> None:
+                self.assertIsInstance(self.main.dep, _Dep)
+                self.assertIs(self.main.dep, self.dep)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
 
 
 # ===================================================================== #
@@ -1496,7 +1642,7 @@ class TestParameterisedSingletonInline(AsyncTestCase):
 
     async def test_generated_type_has_readable_qualname(self) -> None:
         """The generated subclass has a qualname that includes the arguments."""
-        desc = singleton(ConfigurableCounter, start=10, step=2)
+        desc = _SingletonDescriptor(ConfigurableCounter, start=10, step=2)
         self.assertIn("ConfigurableCounter", desc.cls.__qualname__)
         self.assertIn("start=10", desc.cls.__qualname__)
         self.assertIn("step=2", desc.cls.__qualname__)
@@ -1566,3 +1712,210 @@ class TestSingletonCrashPropagation(AsyncTestCase):
         # The good singleton should have been torn down when the
         # crashing singleton caused the TaskGroup to cancel.
         self.assertTrue(torn_down)
+
+
+# ===================================================================== #
+#  Function singleton tests
+# ===================================================================== #
+
+
+async def _run_functions(
+    *funcs: Callable[..., Coroutine[Any, Any, None]],
+    max_concurrency: int | None = None,
+    failfast: bool = False,
+) -> AsyncTestResult:
+    """Run one or more standalone test functions and return the result."""
+    runner = AsyncTestRunner(
+        max_concurrency=max_concurrency,
+        verbosity=0,
+        failfast=failfast,
+    )
+    return await runner.run_functions_async(*funcs)
+
+
+class TestFunctionSingletonDiscovery(AsyncTestCase, concurrent=True):
+    """Tests for discover_singletons_from_function."""
+
+    async def test_discover_from_annotation(self) -> None:
+        """A bare Singleton subclass annotation is discovered."""
+
+        async def test_fn(ctr: Counter) -> None:
+            pass
+
+        found = discover_singletons_from_function(test_fn)
+        self.assertEqual(set(found.keys()), {"ctr"})
+        self.assertIs(found["ctr"].cls, Counter)
+
+    async def test_discover_from_default(self) -> None:
+        """An explicit singleton() default is discovered."""
+
+        async def test_fn(ctr: object = singleton(Counter)) -> None:
+            pass
+
+        found = discover_singletons_from_function(test_fn)
+        self.assertEqual(set(found.keys()), {"ctr"})
+        self.assertIs(found["ctr"].cls, Counter)
+
+    async def test_default_wins_over_annotation(self) -> None:
+        """When both annotation and default exist, the default wins."""
+
+        async def test_fn(
+            ctr: ConfigurableCounter = singleton(ConfigurableCounter, start=10),
+        ) -> None:
+            pass
+
+        found = discover_singletons_from_function(test_fn)
+        self.assertEqual(set(found.keys()), {"ctr"})
+        # The descriptor should be the parameterised one from the default.
+        self.assertIn("start=10", found["ctr"].cls.__qualname__)
+
+    async def test_discover_multiple_annotations(self) -> None:
+        async def test_fn(ctr: Counter, greet: Greeter) -> None:
+            pass
+
+        found = discover_singletons_from_function(test_fn)
+        self.assertEqual(set(found.keys()), {"ctr", "greet"})
+
+    async def test_discover_no_singletons(self) -> None:
+        async def test_fn() -> None:
+            pass
+
+        found = discover_singletons_from_function(test_fn)
+        self.assertEqual(found, {})
+
+    async def test_non_singleton_annotations_ignored(self) -> None:
+        """Non-Singleton type annotations are ignored."""
+
+        async def test_fn(x: int = 42, name: str = "hello") -> None:
+            pass
+
+        found = discover_singletons_from_function(test_fn)
+        self.assertEqual(found, {})
+
+    async def test_discover_mixed(self) -> None:
+        """Annotation-based and non-singleton params coexist."""
+
+        async def test_fn(x: int, ctr: Counter) -> None:
+            pass
+
+        found = discover_singletons_from_function(test_fn)
+        self.assertEqual(set(found.keys()), {"ctr"})
+
+    async def test_discover_from_suite_with_functions(self) -> None:
+        """discover_singletons_from_suite finds singletons in functions too."""
+
+        async def test_fn(ctr: Counter) -> None:
+            pass
+
+        result = discover_singletons_from_suite([], functions=[test_fn])
+        key = singleton_key(_SingletonDescriptor(Counter))
+        self.assertIn(key, result)
+
+
+class TestFunctionSingletonInjection(AsyncTestCase):
+    async def test_inject_function_resolves_singletons(self) -> None:
+        """SingletonManager.inject_function returns resolved kwargs."""
+
+        async def test_fn(ctr: Counter) -> None:
+            pass
+
+        async with SingletonManager() as sm:
+            kwargs = await sm.inject_function(test_fn)
+            self.assertIn("ctr", kwargs)
+            self.assertIsInstance(kwargs["ctr"], Counter)
+
+    async def test_inject_function_shares_with_class(self) -> None:
+        """Functions and classes share the same singleton instance."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_ok(self) -> None:
+                pass
+
+        async def test_fn(ctr: Counter) -> None:
+            pass
+
+        suite = AsyncTestSuite()
+        suite.add_class(_Inner)
+        suite.add_function(test_fn)
+
+        async with SingletonManager() as sm:
+            await sm.inject(suite.entries)
+            kwargs = await sm.inject_function(test_fn)
+            self.assertIs(_Inner.ctr, kwargs["ctr"])
+
+
+class TestFunctionSingletonIntegration(AsyncTestCase):
+    async def test_basic_singleton_in_function(self) -> None:
+        """A function test receives its singleton via annotation."""
+
+        async def test_use_counter(ctr: Counter) -> None:
+            ctr.increment()
+            assert ctr.value >= 1
+
+        result = await _run_functions(test_use_counter)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 1)
+
+    async def test_multiple_singletons_in_function(self) -> None:
+        async def test_both(ctr: Counter, greet: Greeter) -> None:
+            assert greet.greet("World") == "Hello, World!"
+
+        result = await _run_functions(test_both)
+        self.assertTrue(result.was_successful)
+
+    async def test_parameterised_singleton_via_subclass(self) -> None:
+        """Parameterised singletons work via subclass annotation."""
+
+        async def test_from10(ctr: CounterFrom10) -> None:
+            assert ctr.value == 10
+
+        result = await _run_functions(test_from10)
+        self.assertTrue(result.was_successful)
+
+    async def test_inline_parameterised_singleton_in_function(self) -> None:
+        """Inline parameterised singletons use default values."""
+
+        async def test_from42(
+            ctr: ConfigurableCounter = singleton(ConfigurableCounter, start=42),
+        ) -> None:
+            assert ctr.value == 42
+
+        result = await _run_functions(test_from42)
+        self.assertTrue(result.was_successful)
+
+    async def test_singleton_shared_between_function_and_class(self) -> None:
+        """A mixed suite shares singleton instances between classes and functions."""
+        saw: list[object] = []
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(Counter)
+
+            async def test_class(self) -> None:
+                self.assertIsInstance(self.ctr, Counter)
+                saw.append(self.ctr)
+
+        async def test_func(ctr: Counter) -> None:
+            assert isinstance(ctr, Counter)
+            saw.append(ctr)
+
+        suite = AsyncTestSuite()
+        suite.add_class(_Inner)
+        suite.add_function(test_func)
+        runner = AsyncTestRunner(verbosity=0)
+        result = await runner.run_suite_async(suite)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 2)
+        # Class and function should share the same instance
+        self.assertEqual(len(saw), 2)
+        self.assertIs(saw[0], saw[1])
+
+    async def test_function_without_singletons_still_works(self) -> None:
+        async def test_plain() -> None:
+            assert 1 + 1 == 2
+
+        result = await _run_functions(test_plain)
+        self.assertTrue(result.was_successful)

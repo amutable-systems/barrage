@@ -4,53 +4,15 @@ import functools
 import inspect
 from collections.abc import Callable, Container, Coroutine
 from contextlib import AbstractAsyncContextManager
-from types import TracebackType
-from typing import Any, ClassVar, Protocol, Self, TypeGuard, overload
+from typing import Any, ClassVar, TypeGuard, overload
 
-
-class _SupportsDunderGT[T_contra](Protocol):
-    def __gt__(self, other: T_contra, /) -> object: ...
-
-
-class _SupportsDunderGE[T_contra](Protocol):
-    def __ge__(self, other: T_contra, /) -> object: ...
-
-
-class _SupportsDunderLT[T_contra](Protocol):
-    def __lt__(self, other: T_contra, /) -> object: ...
-
-
-class _SupportsDunderLE[T_contra](Protocol):
-    def __le__(self, other: T_contra, /) -> object: ...
-
-
-class SkipTest(Exception):
-    """Raised to skip a test."""
-
-    def __init__(self, reason: str = "") -> None:
-        super().__init__(reason)
-        self.reason = reason
-
-
-class _AssertRaisesContext:
-    """Context manager for ``assertRaises``."""
-
-    def __init__(self, exc_type: type[BaseException]) -> None:
-        self.exc_type = exc_type
-        self.exception: BaseException | None = None
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(
-        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, tb: TracebackType | None
-    ) -> bool:
-        if exc_type is None:
-            raise AssertionError(f"{self.exc_type.__name__} not raised")
-        if not issubclass(exc_type, self.exc_type):
-            return False  # re-raise unexpected exception
-        self.exception = exc_val
-        return True  # suppress the expected exception
+import barrage.assertions as Assert
+from barrage.assertions import (
+    _SupportsDunderGE,
+    _SupportsDunderGT,
+    _SupportsDunderLE,
+    _SupportsDunderLT,
+)
 
 
 class AsyncTestCase:
@@ -117,50 +79,44 @@ class AsyncTestCase:
 
     # ------------------------------------------------------------------ #
     # Assertion helpers
+    #
+    # All assertions delegate to :mod:`barrage.assertions` so that
+    # the same logic is available to standalone test functions via
+    # ``import barrage.assertions as A``.
     # ------------------------------------------------------------------ #
 
     def fail(self, msg: str | None = None) -> None:
-        raise AssertionError(msg or "test failed explicitly")
+        Assert.fail(msg)
 
     def assertTrue(self, expr: object, msg: str | None = None) -> None:
-        if not expr:
-            raise AssertionError(msg or f"expected truthy, got {expr!r}")
+        Assert.true(expr, msg)
 
     def assertFalse(self, expr: object, msg: str | None = None) -> None:
-        if expr:
-            raise AssertionError(msg or f"expected falsy, got {expr!r}")
+        Assert.false(expr, msg)
 
     def assertEqual(self, first: object, second: object, msg: str | None = None) -> None:
-        if first != second:
-            raise AssertionError(msg or f"{first!r} != {second!r}")
+        Assert.eq(first, second, msg)
 
     def assertNotEqual(self, first: object, second: object, msg: str | None = None) -> None:
-        if first == second:
-            raise AssertionError(msg or f"{first!r} == {second!r}")
+        Assert.ne(first, second, msg)
 
     def assertIs(self, first: object, second: object, msg: str | None = None) -> None:
-        if first is not second:
-            raise AssertionError(msg or f"{first!r} is not {second!r}")
+        Assert.is_(first, second, msg)
 
     def assertIsNot(self, first: object, second: object, msg: str | None = None) -> None:
-        if first is second:
-            raise AssertionError(msg or f"{first!r} is {second!r}")
+        Assert.is_not(first, second, msg)
 
     def assertIsNone(self, expr: object, msg: str | None = None) -> None:
-        if expr is not None:
-            raise AssertionError(msg or f"expected None, got {expr!r}")
+        Assert.none(expr, msg)
 
     def assertIsNotNone(self, expr: object, msg: str | None = None) -> None:
-        if expr is None:
-            raise AssertionError(msg or "expected non-None value")
+        Assert.not_none(expr, msg)
 
     def assertIn(self, member: object, container: Container[object], msg: str | None = None) -> None:
-        if member not in container:
-            raise AssertionError(msg or f"{member!r} not in {container!r}")
+        Assert.in_(member, container, msg)
 
     def assertNotIn(self, member: object, container: Container[object], msg: str | None = None) -> None:
-        if member in container:
-            raise AssertionError(msg or f"{member!r} unexpectedly in {container!r}")
+        Assert.not_in(member, container, msg)
 
     @overload
     def assertIsInstance[T](self, obj: object, cls: type[T], msg: str | None = None) -> TypeGuard[T]: ...
@@ -169,32 +125,17 @@ class AsyncTestCase:
         self, obj: object, cls: tuple[type[T], ...], msg: str | None = None
     ) -> TypeGuard[T]: ...
     def assertIsInstance(self, obj: object, cls: type | tuple[type, ...], msg: str | None = None) -> bool:
-        if not isinstance(obj, cls):
-            raise AssertionError(msg or f"{obj!r} is not an instance of {cls!r}")
-        return True
+        return Assert.isinstance_(obj, cls, msg)
 
     def assertIsNotInstance(self, obj: object, cls: type | tuple[type, ...], msg: str | None = None) -> None:
-        if isinstance(obj, cls):
-            raise AssertionError(msg or f"{obj!r} is unexpectedly an instance of {cls!r}")
-
-    # The comparison assertions use two overloads each, mirroring
-    # typeshed's approach for unittest.TestCase. The first overload
-    # checks whether ``first`` supports the forward dunder (e.g.
-    # ``__gt__``), the second checks whether ``second`` supports the
-    # reflected dunder (e.g. ``__lt__``). This is needed because type
-    # checkers may widen ``float`` to ``int | float`` (PEP 484 numeric
-    # tower), and ``int`` alone does not satisfy e.g.
-    # ``_SupportsDunderGT[int | float]`` since ``int.__gt__`` only
-    # accepts ``int``. The two-overload pattern lets at least one
-    # overload match in all practical cases.
+        Assert.not_isinstance(obj, cls, msg)
 
     @overload
     def assertGreater[T](self, first: _SupportsDunderGT[T], second: T, msg: str | None = None) -> None: ...
     @overload
     def assertGreater[T](self, first: T, second: _SupportsDunderLT[T], msg: str | None = None) -> None: ...
     def assertGreater(self, first: Any, second: Any, msg: str | None = None) -> None:
-        if not first > second:
-            raise AssertionError(msg or f"{first!r} is not greater than {second!r}")
+        Assert.gt(first, second, msg)
 
     @overload
     def assertGreaterEqual[T](
@@ -205,36 +146,32 @@ class AsyncTestCase:
         self, first: T, second: _SupportsDunderLE[T], msg: str | None = None
     ) -> None: ...
     def assertGreaterEqual(self, first: Any, second: Any, msg: str | None = None) -> None:
-        if not first >= second:
-            raise AssertionError(msg or f"{first!r} is not greater than or equal to {second!r}")
+        Assert.ge(first, second, msg)
 
     @overload
     def assertLess[T](self, first: _SupportsDunderLT[T], second: T, msg: str | None = None) -> None: ...
     @overload
     def assertLess[T](self, first: T, second: _SupportsDunderGT[T], msg: str | None = None) -> None: ...
     def assertLess(self, first: Any, second: Any, msg: str | None = None) -> None:
-        if not first < second:
-            raise AssertionError(msg or f"{first!r} is not less than {second!r}")
+        Assert.lt(first, second, msg)
 
     @overload
     def assertLessEqual[T](self, first: _SupportsDunderLE[T], second: T, msg: str | None = None) -> None: ...
     @overload
     def assertLessEqual[T](self, first: T, second: _SupportsDunderGE[T], msg: str | None = None) -> None: ...
     def assertLessEqual(self, first: Any, second: Any, msg: str | None = None) -> None:
-        if not first <= second:
-            raise AssertionError(msg or f"{first!r} is not less than or equal to {second!r}")
+        Assert.le(first, second, msg)
 
     def assertAlmostEqual(
         self, first: float, second: float, places: int = 7, msg: str | None = None
     ) -> None:
-        if round(abs(second - first), places) != 0:
-            raise AssertionError(msg or f"{first!r} != {second!r} within {places} places")
+        Assert.almost_eq(first, second, places, msg)
 
-    def assertRaises(self, exc_type: type[BaseException]) -> _AssertRaisesContext:
-        return _AssertRaisesContext(exc_type)
+    def assertRaises(self, exc_type: type[BaseException]) -> Assert._RaisesContext:
+        return Assert.raises(exc_type)
 
     def skipTest(self, reason: str = "") -> None:
-        raise SkipTest(reason)
+        Assert.skip(reason)
 
     # ------------------------------------------------------------------ #
     # Representation

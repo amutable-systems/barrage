@@ -19,6 +19,9 @@ Usage::
     # Run a single test method
     python3 -m barrage test/test_example.py::MyTestClass::test_method
 
+    # Run a single standalone test function
+    python3 -m barrage test/test_example.py::test_function_name
+
     # Multiple paths at once
     python3 -m barrage test/test_foo.py test/test_bar.py::SomeClass
 
@@ -125,8 +128,9 @@ def main(argv: list[str] | None = None) -> int:
         metavar="path",
         help=(
             "Paths to test files or directories.  A path may be suffixed "
-            "with ::ClassName to select a single test class, or "
-            "::ClassName::test_method to select a single test.  "
+            "with ::ClassName to select a single test class, "
+            "::ClassName::test_method to select a single test, or "
+            "::function_name to select a standalone test function.  "
             "When no paths are given, discovers tests in the current "
             "directory (or -t if set)."
         ),
@@ -139,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
 
     suite = resolve_tests(paths, pattern=args.pattern, top_level_dir=top_level_dir)
 
-    if not suite.entries:
+    if not suite.entries and not suite.functions:
         print("No tests discovered.", file=sys.stderr)
         return 2
 

@@ -3,7 +3,7 @@ import asyncio
 import io
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 from barrage.colorize import (
     colored_captured_header,
@@ -14,8 +14,16 @@ from barrage.colorize import (
     strip_ansi,
 )
 
-if TYPE_CHECKING:
-    from barrage.case import AsyncTestCase
+
+class TestIdentity(Protocol):
+    """Structural protocol for objects that identify a test.
+
+    Both :class:`~barrage.case.AsyncTestCase` instances and
+    :class:`~barrage.runner._FunctionTestProxy` satisfy this protocol.
+    """
+
+    def id(self) -> str: ...
+    def __str__(self) -> str: ...
 
 
 class Outcome(Enum):
@@ -56,7 +64,7 @@ class AsyncTestResult:
 
     async def add_success(
         self,
-        test: "AsyncTestCase",
+        test: TestIdentity,
         duration: float,
         stdout: str = "",
         stderr: str = "",
@@ -75,7 +83,7 @@ class AsyncTestResult:
 
     async def add_failure(
         self,
-        test: "AsyncTestCase",
+        test: TestIdentity,
         exc: BaseException,
         duration: float,
         stdout: str = "",
@@ -98,7 +106,7 @@ class AsyncTestResult:
 
     async def add_error(
         self,
-        test: "AsyncTestCase",
+        test: TestIdentity,
         exc: BaseException,
         duration: float,
         stdout: str = "",
@@ -119,7 +127,7 @@ class AsyncTestResult:
             self.results.append(outcome)
         return outcome
 
-    async def add_skip(self, test: "AsyncTestCase", reason: str) -> TestOutcome:
+    async def add_skip(self, test: TestIdentity, reason: str) -> TestOutcome:
         outcome = TestOutcome(
             test_id=test.id(),
             test_str=str(test),
@@ -130,7 +138,7 @@ class AsyncTestResult:
             self.results.append(outcome)
         return outcome
 
-    async def add_interrupted(self, test: "AsyncTestCase") -> TestOutcome:
+    async def add_interrupted(self, test: TestIdentity) -> TestOutcome:
         outcome = TestOutcome(
             test_id=test.id(),
             test_str=str(test),

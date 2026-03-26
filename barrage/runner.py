@@ -7,10 +7,11 @@ import io
 import os
 import sys
 import time
-from collections.abc import Generator, Iterable
-from typing import TextIO
+from collections.abc import Callable, Coroutine, Generator, Iterable
+from typing import Any, TextIO
 
-from barrage.case import AsyncTestCase, SkipTest
+from barrage.assertions import SkipTest
+from barrage.case import AsyncTestCase
 from barrage.colorize import (
     ANSI,
     capture_excepthook,
@@ -25,7 +26,11 @@ from barrage.colorize import (
 from barrage.environ import _EnvironContext, isolated_environ
 from barrage.result import AsyncTestResult, Outcome, TestOutcome
 from barrage.selector import PriSelector
-from barrage.singleton import SingletonManager, discover_singletons
+from barrage.singleton import (
+    SingletonManager,
+    discover_singletons,
+    discover_singletons_from_function,
+)
 
 
 def _collect_test_methods(cls: type[AsyncTestCase]) -> list[str]:
@@ -159,17 +164,19 @@ def _capture_output() -> Generator[_CapturedOutput]:
 class AsyncTestSuite:
     """
     A collection of test classes (and optionally specific method names)
-    to execute together.
+    and standalone async test functions to execute together.
 
     Usage::
 
         suite = AsyncTestSuite()
         suite.add_class(MyTests)
         suite.add_class(OtherTests, methods=["test_specific"])
+        suite.add_function(test_standalone)
     """
 
     def __init__(self) -> None:
         self._entries: list[tuple[type[AsyncTestCase], list[str] | None]] = []
+        self._functions: list[Callable[..., Coroutine[Any, Any, None]]] = []
 
     def add_class(
         self,
@@ -182,6 +189,13 @@ class AsyncTestSuite:
         """
         self._entries.append((cls, methods))
 
+    def add_function(
+        self,
+        func: Callable[..., Coroutine[Any, Any, None]],
+    ) -> None:
+        """Add a standalone async test function."""
+        self._functions.append(func)
+
     @property
     def entries(self) -> list[tuple[type[AsyncTestCase], list[str]]]:
         resolved: list[tuple[type[AsyncTestCase], list[str]]] = []
@@ -190,6 +204,10 @@ class AsyncTestSuite:
                 methods = _collect_test_methods(cls)
             resolved.append((cls, methods))
         return resolved
+
+    @property
+    def functions(self) -> list[Callable[..., Coroutine[Any, Any, None]]]:
+        return list(self._functions)
 
 
 # ===================================================================== #
@@ -503,6 +521,30 @@ def _write_captured_output_to_stream(
 # ===================================================================== #
 
 
+class _FunctionTestProxy:
+    """Lightweight stand-in that satisfies :class:`TestIdentity` for function tests.
+
+    Used by :func:`_run_single_function` to record outcomes via
+    :class:`AsyncTestResult` without requiring an :class:`AsyncTestCase` instance.
+    """
+
+    def __init__(self, func: Callable[..., Coroutine[Any, Any, None]]) -> None:
+        self._func = func
+        name = getattr(func, "__name__", repr(func))
+        self._module = getattr(func, "__module__", "<unknown>")
+        self._qualname = getattr(func, "__qualname__", name)
+        self._name = name
+
+    def id(self) -> str:
+        return f"{self._module}.{self._qualname}"
+
+    def __str__(self) -> str:
+        return f"{self._qualname}"
+
+    def __repr__(self) -> str:
+        return f"<{self._qualname}>"
+
+
 class _FailFast(Exception):
     """Raised when failfast is enabled and a test fails or errors."""
 
@@ -720,6 +762,166 @@ async def _run_single_test(
                 _interactive_line(
                     interactive_stream,
                     instance,
+                    Outcome.PASSED,
+                    duration,
+                    colorize=colorize,
+                    had_output=had_output,
+                )
+
+        if progress is not None:
+            await progress.test_finished(recorded)
+
+        if failfast and recorded.outcome in (Outcome.FAILED, Outcome.ERRORED):
+            raise _FailFast()
+
+
+async def _run_single_function(
+    func: Callable[..., Coroutine[Any, Any, None]],
+    result: AsyncTestResult,
+    semaphore: asyncio.Semaphore,
+    singleton_kwargs: dict[str, Any] | None = None,
+    *,
+    capture: bool = True,
+    colorize: bool = False,
+    interactive_stream: TextIO | None = None,
+    progress: _ProgressDisplay | None = None,
+    failfast: bool = False,
+) -> None:
+    """Run a standalone async test function, recording the outcome."""
+
+    proxy = _FunctionTestProxy(func)
+
+    async with contextlib.AsyncExitStack() as stack:
+        await stack.enter_async_context(semaphore)
+
+        if progress is not None:
+            await progress.test_started(proxy.id(), str(proxy))
+
+        # ── per-test environment snapshot ─────────────────────────
+        stack.enter_context(isolated_environ())
+
+        # ── optional output capture ──────────────────────────────
+        captured = stack.enter_context(_capture_output()) if capture else None
+
+        # ── interactive prefix + output detection ────────────────
+        if interactive_stream is not None:
+            _interactive_pre_function(
+                interactive_stream,
+                proxy,
+                colorize=colorize,
+            )
+        detectors = stack.enter_context(_detect_output()) if interactive_stream is not None else None
+
+        t0 = time.monotonic()
+
+        # ── call the function ────────────────────────────────────
+        test_exc: BaseException | None = None
+        test_is_skip = False
+        test_is_failure = False
+        cancelled_exc: asyncio.CancelledError | None = None
+        try:
+            await func(**(singleton_kwargs or {}))
+        except asyncio.CancelledError as exc:
+            cancelled_exc = exc
+        except SkipTest as exc:
+            test_exc = exc
+            test_is_skip = True
+        except AssertionError as exc:
+            test_exc = exc
+            test_is_failure = True
+        except BaseException as exc:
+            test_exc = exc
+
+        duration = time.monotonic() - t0
+        stdout = captured.stdout if captured else ""
+        stderr = captured.stderr if captured else ""
+        had_output = detectors.had_output if detectors else False
+
+        # ── record outcome ───────────────────────────────────────
+        if cancelled_exc is not None:
+            recorded = await result.add_interrupted(proxy)
+            if interactive_stream is not None:
+                _interactive_line_function(
+                    interactive_stream,
+                    proxy,
+                    Outcome.INTERRUPTED,
+                    duration,
+                    colorize=colorize,
+                    had_output=had_output,
+                )
+            if progress is not None:
+                await progress.test_finished(recorded)
+            raise cancelled_exc
+        elif test_is_skip:
+            assert isinstance(test_exc, SkipTest)
+            recorded = await result.add_skip(proxy, test_exc.reason)
+            if interactive_stream is not None:
+                _interactive_line_function(
+                    interactive_stream,
+                    proxy,
+                    Outcome.SKIPPED,
+                    duration,
+                    test_exc.reason,
+                    colorize=colorize,
+                    had_output=had_output,
+                )
+        elif test_is_failure:
+            assert test_exc is not None
+            tb = capture_excepthook(
+                type(test_exc),
+                test_exc,
+                test_exc.__traceback__,
+                colorize=colorize,
+            )
+            recorded = await result.add_failure(
+                proxy,
+                test_exc,
+                duration,
+                stdout=stdout,
+                stderr=stderr,
+                traceback_str=tb,
+            )
+            if interactive_stream is not None:
+                _interactive_line_function(
+                    interactive_stream,
+                    proxy,
+                    Outcome.FAILED,
+                    duration,
+                    colorize=colorize,
+                    had_output=had_output,
+                )
+                _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
+        elif test_exc is not None:
+            tb = capture_excepthook(
+                type(test_exc),
+                test_exc,
+                test_exc.__traceback__,
+                colorize=colorize,
+            )
+            recorded = await result.add_error(
+                proxy,
+                test_exc,
+                duration,
+                stdout=stdout,
+                stderr=stderr,
+                traceback_str=tb,
+            )
+            if interactive_stream is not None:
+                _interactive_line_function(
+                    interactive_stream,
+                    proxy,
+                    Outcome.ERRORED,
+                    duration,
+                    colorize=colorize,
+                    had_output=had_output,
+                )
+                _interactive_traceback(interactive_stream, tb, stdout, stderr, colorize=colorize)
+        else:
+            recorded = await result.add_success(proxy, duration, stdout=stdout, stderr=stderr)
+            if interactive_stream is not None:
+                _interactive_line_function(
+                    interactive_stream,
+                    proxy,
                     Outcome.PASSED,
                     duration,
                     colorize=colorize,
@@ -972,6 +1174,59 @@ def _interactive_line(
     stream.flush()
 
 
+def _interactive_pre_function(
+    stream: TextIO,
+    proxy: _FunctionTestProxy,
+    colorize: bool = False,
+) -> None:
+    """Print the ``test_name ...`` line before a function test runs."""
+    name = proxy._name
+    if colorize:
+        display = f"  {name} ... "
+    else:
+        display = f"  {name} ... "
+    stream.write(display + "\n")
+    stream.flush()
+
+
+def _interactive_line_function(
+    stream: TextIO,
+    proxy: _FunctionTestProxy,
+    outcome: Outcome,
+    duration: float,
+    reason: str = "",
+    colorize: bool = False,
+    had_output: bool = False,
+) -> None:
+    """Print the result of a standalone function test in interactive mode."""
+    name = proxy._name
+    label = _OUTCOME_LABELS[outcome]
+    extra = f" ({reason})" if reason else ""
+    dur = colored_duration(duration, color=colorize)
+
+    is_tty = False
+    try:
+        is_tty = stream.isatty()
+    except (AttributeError, ValueError):
+        pass
+
+    if not had_output and is_tty:
+        if colorize:
+            label_styled = style(label, *_OUTCOME_LABEL_STYLES.get(outcome, ()))
+            stream.write(f"\033[A\r\033[2K  {name} ... {label_styled}{extra} ({dur})\n")
+        else:
+            stream.write(f"\033[A\r\033[2K  {name} ... {label}{extra} ({duration:.3f}s)\n")
+    else:
+        if colorize:
+            prefix = f"  {name} ... "
+            label_styled = style(label, *_OUTCOME_LABEL_STYLES.get(outcome, ()))
+            stream.write(f"{prefix}{label_styled}{extra} ({dur})\n")
+        else:
+            prefix = f"  {name} ... "
+            stream.write(f"{prefix}{label}{extra} ({duration:.3f}s)\n")
+    stream.flush()
+
+
 def _interactive_traceback(
     stream: TextIO,
     tb_str: str,
@@ -1061,9 +1316,12 @@ class AsyncTestRunner:
         """Run the suite inside an already-running event loop."""
         result = self.result = AsyncTestResult()
         entries = suite.entries
+        functions = suite.functions
 
         # ── singleton injection ───────────────────────────────────────
-        has_singletons = any(discover_singletons(cls) for cls, _methods in entries)
+        has_singletons = any(discover_singletons(cls) for cls, _methods in entries) or any(
+            discover_singletons_from_function(f) for f in functions
+        )
 
         interactive_stream: TextIO | None = None
         capture: bool
@@ -1109,7 +1367,7 @@ class AsyncTestRunner:
                 suite_stack.enter_context(_StdinContext())
 
             # ── set up live progress display (non-interactive only) ──
-            total_tests = sum(len(methods) for _, methods in entries)
+            total_tests = sum(len(methods) for _, methods in entries) + len(functions)
             progress: _ProgressDisplay | None = None
             if not self.interactive and self.verbosity >= 1:
                 is_tty = False
@@ -1134,6 +1392,8 @@ class AsyncTestRunner:
             # ── print pre-run overview ───────────────────────────────
             if self.verbosity >= 1:
                 overview_entries = [(cls.__qualname__, len(methods)) for cls, methods in entries]
+                if functions:
+                    overview_entries.append((f"{len(functions)} standalone function(s)", len(functions)))
                 overview = colored_overview(overview_entries, total_tests, color=colorize)
                 overview_stream = interactive_stream if interactive_stream is not None else real_stdout
                 overview_stream.write(overview)
@@ -1141,19 +1401,25 @@ class AsyncTestRunner:
 
             result.start_time = time.monotonic()
 
+            # Pre-resolved singleton kwargs for each function test,
+            # populated inside run_tests() when singletons are active.
+            func_kwargs: list[dict[str, Any]] = [{} for _ in functions]
+
             async def run_tests() -> None:
-                """Run all test classes, with optional singleton injection."""
+                """Run all tests, with optional singleton injection."""
                 if has_singletons:
                     async with SingletonManager() as sm:
                         await sm.inject(entries)
-                        await _run_all_classes()
+                        for i, func in enumerate(functions):
+                            func_kwargs[i] = await sm.inject_function(func)
+                        await _run_all_tests()
                 else:
-                    await _run_all_classes()
+                    await _run_all_tests()
 
-            async def _run_all_classes() -> None:
+            async def _run_all_tests() -> None:
                 if self.interactive:
-                    # In interactive mode run classes sequentially so that
-                    # their output is not interleaved.
+                    # In interactive mode run everything sequentially so
+                    # that output is not interleaved.
                     for cls, methods in entries:
                         await _run_class(
                             cls,
@@ -1166,9 +1432,24 @@ class AsyncTestRunner:
                             progress=progress,
                             failfast=self.failfast,
                         )
+                    if functions and interactive_stream is not None:
+                        interactive_stream.write("\n")
+                        interactive_stream.flush()
+                    for i, func in enumerate(functions):
+                        await _run_single_function(
+                            func,
+                            result,
+                            semaphore,
+                            singleton_kwargs=func_kwargs[i] or None,
+                            capture=capture,
+                            colorize=colorize,
+                            interactive_stream=interactive_stream,
+                            progress=progress,
+                            failfast=self.failfast,
+                        )
                 else:
-                    # Each class gets its own task so that different classes
-                    # run concurrently.
+                    # Each class and each function gets its own task so
+                    # that they all run concurrently.
                     async with asyncio.TaskGroup() as tg:
                         for cls, methods in entries:
                             tg.create_task(
@@ -1184,6 +1465,21 @@ class AsyncTestRunner:
                                     failfast=self.failfast,
                                 ),
                                 name=f"class:{cls.__qualname__}",
+                            )
+                        for i, func in enumerate(functions):
+                            tg.create_task(
+                                _run_single_function(
+                                    func,
+                                    result,
+                                    semaphore,
+                                    singleton_kwargs=func_kwargs[i] or None,
+                                    capture=capture,
+                                    colorize=colorize,
+                                    interactive_stream=interactive_stream,
+                                    progress=progress,
+                                    failfast=self.failfast,
+                                ),
+                                name=f"func:{getattr(func, '__qualname__', repr(func))}",
                             )
 
             try:
@@ -1207,4 +1503,24 @@ class AsyncTestRunner:
         suite = AsyncTestSuite()
         for cls in classes:
             suite.add_class(cls)
+        return await self.run_suite_async(suite)
+
+    def run_functions(
+        self,
+        *funcs: Callable[..., Coroutine[Any, Any, None]],
+    ) -> AsyncTestResult:
+        """Convenience: build a suite from one or more functions and run it."""
+        suite = AsyncTestSuite()
+        for f in funcs:
+            suite.add_function(f)
+        return self.run_suite(suite)
+
+    async def run_functions_async(
+        self,
+        *funcs: Callable[..., Coroutine[Any, Any, None]],
+    ) -> AsyncTestResult:
+        """Async version of :meth:`run_functions`."""
+        suite = AsyncTestSuite()
+        for f in funcs:
+            suite.add_function(f)
         return await self.run_suite_async(suite)

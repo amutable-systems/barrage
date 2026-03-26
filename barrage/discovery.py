@@ -5,7 +5,9 @@ import inspect
 import os
 import sys
 import types
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import Any, cast
 
 from barrage.case import AsyncTestCase
 from barrage.runner import AsyncTestSuite, _collect_test_methods
@@ -22,17 +24,21 @@ def resolve_tests(
     Each *path_spec* is a string of the form::
 
         path[::ClassName[::method_name]]
+        path[::function_name]
 
     Where *path* may be a directory or a ``.py`` file.
 
     * **Directory** – recursively discover all test files matching
       *pattern* (``::`` suffixes are not allowed here).
     * **File** – import the file and collect all
-      :class:`AsyncTestCase` subclasses.
+      :class:`AsyncTestCase` subclasses and standalone ``async def
+      test_*`` functions.
     * **File::ClassName** – import the file and collect only the
       named class.
     * **File::ClassName::method_name** – import the file and collect
       only the named method from the named class.
+    * **File::function_name** – import the file and collect only the
+      named standalone test function (if no class matches).
 
     Parameters
     ----------
@@ -50,7 +56,8 @@ def resolve_tests(
     Returns
     -------
     AsyncTestSuite
-        A suite containing the resolved test classes and methods.
+        A suite containing the resolved test classes, methods, and
+        functions.
 
     Raises
     ------
@@ -180,6 +187,8 @@ def _discover_directory(
                 methods = _collect_test_methods(cls)
                 if methods:
                     suite.add_class(cls, methods)
+            for func in _find_test_functions(module):
+                suite.add_function(func)
 
 
 # ===================================================================== #
@@ -232,8 +241,17 @@ def _discover_file(
         # Look for a specific class.
         cls = _find_named_class(module, class_name)
         if cls is None:
+            # Not a class — try as a standalone function name.
+            # Only valid when no method_name is given (functions don't
+            # have sub-components).
+            if method_name is None:
+                func = _find_named_function(module, class_name)
+                if func is not None:
+                    suite.add_function(func)
+                    return
+
             print(
-                f"Error: class {class_name!r} not found in {filepath}",
+                f"Error: class or function {class_name!r} not found in {filepath}",
                 file=sys.stderr,
             )
             raise SystemExit(2)
@@ -253,11 +271,13 @@ def _discover_file(
             if methods:
                 suite.add_class(cls, methods)
     else:
-        # Collect all test classes from the file.
+        # Collect all test classes and standalone functions from the file.
         for cls in _find_test_classes(module):
             methods = _collect_test_methods(cls)
             if methods:
                 suite.add_class(cls, methods)
+        for func in _find_test_functions(module):
+            suite.add_function(func)
 
 
 # ===================================================================== #
@@ -267,14 +287,16 @@ def _discover_file(
 
 def discover_module(module: types.ModuleType) -> AsyncTestSuite:
     """
-    Build a suite from all ``AsyncTestCase`` subclasses found in an
-    already-imported module.
+    Build a suite from all ``AsyncTestCase`` subclasses and standalone
+    ``async def test_*`` functions found in an already-imported module.
     """
     suite = AsyncTestSuite()
     for cls in _find_test_classes(module):
         methods = _collect_test_methods(cls)
         if methods:
             suite.add_class(cls, methods)
+    for func in _find_test_functions(module):
+        suite.add_function(func)
     return suite
 
 
@@ -371,3 +393,40 @@ def _find_named_class(
     if obj is AsyncTestCase:
         return None
     return obj
+
+
+def _find_test_functions(
+    module: types.ModuleType,
+) -> list[Callable[..., Coroutine[Any, Any, None]]]:
+    """Return all module-level ``async def test_*`` coroutine functions.
+
+    Functions with ``__test__ = False`` are excluded, following the
+    same convention as :func:`_find_test_classes`.
+    """
+    functions: list[Callable[..., Coroutine[Any, Any, None]]] = []
+    for name, obj in inspect.getmembers(module, inspect.iscoroutinefunction):
+        if not name.startswith("test_"):
+            continue
+        # Skip functions not defined in this module.
+        if getattr(obj, "__module__", None) != module.__name__:
+            continue
+        # Honour the ``__test__ = False`` convention.
+        if getattr(obj, "__test__", True) is False:
+            continue
+        functions.append(obj)
+    return sorted(functions, key=lambda f: f.__name__)
+
+
+def _find_named_function(
+    module: types.ModuleType,
+    name: str,
+) -> Callable[..., Coroutine[Any, Any, None]] | None:
+    """Find a specific ``async def test_*`` function by name in *module*."""
+    obj = getattr(module, name, None)
+    if obj is None:
+        return None
+    if not inspect.iscoroutinefunction(obj):
+        return None
+    if not name.startswith("test_"):
+        return None
+    return cast(Callable[..., Coroutine[Any, Any, None]], obj)

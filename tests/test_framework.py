@@ -22,10 +22,12 @@ import contextlib
 import io
 import sys
 import time
+from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
-from barrage.case import AsyncTestCase, MonitoredTestCase, SkipTest
+from barrage.assertions import SkipTest
+from barrage.case import AsyncTestCase, MonitoredTestCase
 from barrage.discovery import discover, discover_module, resolve_tests
 from barrage.result import AsyncTestResult
 from barrage.runner import AsyncTestRunner, AsyncTestSuite, _collect_test_methods
@@ -2706,6 +2708,152 @@ class TestMonitored(AsyncTestCase):
         self.assertEqual(len(result.errors), 1)
         self.assertTrue(SkipTestAfterCrash.test_1_ran)
         self.assertFalse(SkipTestAfterCrash.test_2_ran)
+
+
+# ===================================================================== #
+#  Function tests
+# ===================================================================== #
+
+
+async def _run_functions(
+    *funcs: Callable[..., Coroutine[Any, Any, None]],
+    max_concurrency: int | None = None,
+    interactive: bool = False,
+    show_output: bool = False,
+    interactive_stream: io.StringIO | None = None,
+    failfast: bool = False,
+) -> AsyncTestResult:
+    """Run one or more standalone test functions and return the result."""
+    if interactive and interactive_stream is None:
+        interactive_stream = io.StringIO()
+    runner = AsyncTestRunner(
+        max_concurrency=max_concurrency,
+        verbosity=1 if interactive else 0,
+        interactive=interactive,
+        show_output=show_output,
+        interactive_stream=interactive_stream,
+        failfast=failfast,
+    )
+    return await runner.run_functions_async(*funcs)
+
+
+class TestFunctionTests(AsyncTestCase, concurrent=True):
+    """Tests for standalone async test function support."""
+
+    async def test_passing_function(self) -> None:
+        async def test_ok() -> None:
+            assert 1 + 1 == 2
+
+        result = await _run_functions(test_ok)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 1)
+        self.assertEqual(len(result.passed), 1)
+
+    async def test_failing_function(self) -> None:
+        async def test_fail() -> None:
+            raise AssertionError("deliberate failure")
+
+        result = await _run_functions(test_fail)
+        self.assertFalse(result.was_successful)
+        self.assertEqual(result.tests_run, 1)
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn("deliberate failure", result.failures[0].traceback)
+
+    async def test_error_function(self) -> None:
+        async def test_boom() -> None:
+            raise RuntimeError("kaboom")
+
+        result = await _run_functions(test_boom)
+        self.assertFalse(result.was_successful)
+        self.assertEqual(result.tests_run, 1)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("kaboom", result.errors[0].traceback)
+
+    async def test_skip_function(self) -> None:
+        async def test_skip() -> None:
+            raise SkipTest("not today")
+
+        result = await _run_functions(test_skip)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 1)
+        self.assertEqual(len(result.skipped), 1)
+        self.assertEqual(result.skipped[0].message, "not today")
+
+    async def test_multiple_functions(self) -> None:
+        async def test_one() -> None:
+            assert True
+
+        async def test_two() -> None:
+            assert True
+
+        async def test_three() -> None:
+            assert True
+
+        result = await _run_functions(test_one, test_two, test_three)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 3)
+
+    async def test_function_test_id(self) -> None:
+        """Function test IDs include the module and qualified name."""
+
+        async def test_example() -> None:
+            pass
+
+        result = await _run_functions(test_example)
+        self.assertEqual(result.tests_run, 1)
+        self.assertIn("test_example", result.passed[0].test_id)
+
+    async def test_function_output_capture(self) -> None:
+        async def test_noisy() -> None:
+            print("hello stdout")
+
+        result = await _run_functions(test_noisy, show_output=True)
+        self.assertEqual(result.tests_run, 1)
+        self.assertIn("hello stdout", result.passed[0].stdout)
+
+    async def test_function_failfast(self) -> None:
+        async def test_fail() -> None:
+            raise AssertionError("fail")
+
+        async def test_slow() -> None:
+            await asyncio.sleep(10)
+
+        # With failfast, test_slow should be cancelled before completing.
+        result = await _run_functions(test_fail, test_slow, failfast=True)
+        self.assertFalse(result.was_successful)
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(len(result.passed), 0)
+
+    async def test_mixed_suite(self) -> None:
+        """A suite can contain both classes and functions."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+
+            async def test_class_method(self) -> None:
+                pass
+
+        async def test_standalone() -> None:
+            pass
+
+        suite = AsyncTestSuite()
+        suite.add_class(_Inner)
+        suite.add_function(test_standalone)
+        runner = AsyncTestRunner(verbosity=0)
+        result = await runner.run_suite_async(suite)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 2)
+
+    async def test_function_interactive(self) -> None:
+        """Function tests work in interactive mode."""
+
+        async def test_ok() -> None:
+            assert True
+
+        stream = io.StringIO()
+        result = await _run_functions(test_ok, interactive=True, interactive_stream=stream)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 1)
 
 
 # ===================================================================== #

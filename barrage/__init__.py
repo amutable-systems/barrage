@@ -38,9 +38,10 @@ Quick start::
         print(result.format_report(verbosity=2))
 """
 
+from barrage.assertions import SkipTest
 from barrage.case import AsyncTestCase, MonitoredTestCase
 from barrage.discovery import discover, discover_module, resolve_tests
-from barrage.result import AsyncTestResult, Outcome, TestOutcome
+from barrage.result import AsyncTestResult, Outcome, TestIdentity, TestOutcome
 from barrage.runner import AsyncTestRunner, AsyncTestSuite
 from barrage.singleton import Singleton, SingletonManager, singleton
 from barrage.subprocess import (
@@ -67,6 +68,7 @@ __all__ = [
     "AsyncTestSuite",
     # Results
     "AsyncTestResult",
+    "TestIdentity",
     "TestOutcome",
     "Outcome",
     # Discovery
