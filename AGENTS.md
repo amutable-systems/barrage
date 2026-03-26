@@ -8,13 +8,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-All commands must be run via `mkosi box`, e.g. `mkosi box -- just check`.
-
-- **Check (format, lint, spell, type-check):** `mkosi box -- just check`
-- **Auto-format:** `mkosi box -- just fmt`
-- **Run all tests:** `mkosi box -- just test`
-- **Run specific tests:** `mkosi box -- python3 -m barrage tests/test_framework.py` or `mkosi box -- python3 -m barrage tests/test_framework.py::TestClassName::test_method`
-- **Run mypy only:** `mkosi box -- mypy ./barrage ./tests`
+- **Check (format, lint, spell, type-check):** `just check`
+- **Auto-format:** `just fmt`
+- **Run all tests:** `just test`
+- **Run specific tests:** `python3 -m barrage tests/test_framework.py` or `python3 -m barrage tests/test_framework.py::TestClassName::test_method`
+- **Run mypy only:** `mypy ./barrage ./tests`
 
 ## Architecture
 
