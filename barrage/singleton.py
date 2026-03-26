@@ -115,6 +115,54 @@ class Singleton(AbstractAsyncContextManager["Singleton"]):
 
 
 # ===================================================================== #
+#  Parameterised singleton types
+# ===================================================================== #
+
+# Cache of (cls, kw_items) -> generated subclass.
+_parameterised_types: dict[
+    tuple[type, tuple[tuple[str, object], ...]],
+    type,
+] = {}
+
+
+def _parameterised_singleton_type[T: Singleton](
+    cls: type[T],
+    kwargs: dict[str, object],
+) -> type[T]:
+    """Return a subclass of *cls* created via ``__init_subclass__(**kwargs)``.
+
+    The generated type is cached so that identical ``(cls, kwargs)``
+    combinations always return the same class object.  All values
+    must be hashable; :class:`TypeError` is raised otherwise.
+    """
+    kw_items = tuple(sorted(kwargs.items()))
+
+    # Validate hashability with clear error messages.
+    for name, value in kw_items:
+        try:
+            hash(value)
+        except TypeError:
+            raise TypeError(
+                f"singleton() keyword argument {name!r} is not hashable: "
+                f"{type(value).__name__!r}"
+            ) from None
+
+    key = (cls, kw_items)
+    if key in _parameterised_types:
+        return cast(type[T], _parameterised_types[key])
+
+    parts = [f"{k}={v!r}" for k, v in kw_items]
+    label = ", ".join(parts)
+
+    sub = cast(type[T], types.new_class(f"{cls.__name__}[{label}]", (cls,), dict(kwargs)))
+    sub.__module__ = cls.__module__
+    sub.__qualname__ = f"{cls.__qualname__}[{label}]"
+
+    _parameterised_types[key] = sub
+    return sub
+
+
+# ===================================================================== #
 #  Descriptor
 # ===================================================================== #
 
@@ -139,9 +187,26 @@ class singleton[T: Singleton]:
     Typing works automatically: ``singleton(SomeClass)`` infers ``T``
     from the class, so ``self.my_singleton`` is seen as ``T`` by type
     checkers.
+
+    Keyword arguments are forwarded to ``__init_subclass__`` on a
+    generated subclass::
+
+        db = singleton(Database, url="postgres://localhost/test")
+
+    This creates a parameterised subclass under the hood, keyed by
+    ``(cls, kwargs)`` so identical arguments share a single instance.
+    All values must be hashable.
+
+    Alternatively, create an explicit subclass for full static
+    typing::
+
+        class TestDB(Database, url="postgres://localhost/test"):
+            pass
+
+        db = singleton(TestDB)
     """
 
-    def __init__(self, cls: type[T]) -> None:
+    def __init__(self, cls: type[T], **kwargs: Any) -> None:
         if not isinstance(cls, type):
             raise TypeError(f"singleton() expects a class, got {type(cls).__name__}: {cls!r}")
         if not issubclass(cls, Singleton):
@@ -149,6 +214,8 @@ class singleton[T: Singleton]:
                 f"singleton() expects a Singleton subclass, "
                 f"but {cls.__qualname__!r} does not inherit from Singleton"
             )
+        if kwargs:
+            cls = _parameterised_singleton_type(cls, kwargs)
         self.cls = cls
         self._attr_name: str = ""
 

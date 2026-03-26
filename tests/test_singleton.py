@@ -84,6 +84,38 @@ class Counter(Singleton):
         cls.instances_torn_down = 0
 
 
+class ConfigurableCounter(Singleton):
+    """A singleton that uses __init_subclass__ for configuration."""
+
+    start: int = 0
+    step: int = 1
+
+    def __init_subclass__(cls, *, start: int = 0, step: int = 1, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.start = start
+        cls.step = step
+
+    def __init__(self) -> None:
+        self.value = self.start
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await asyncio.Future()
+
+    def increment(self) -> None:
+        self.value += self.step
+
+
+class CounterFrom10(ConfigurableCounter, start=10):
+    """A parameterised singleton: Counter starting at 10."""
+
+
+class CounterBy5(ConfigurableCounter, step=5):
+    """A parameterised singleton: Counter stepping by 5."""
+
+
 class Greeter(Singleton):
     def __init__(self) -> None:
         self.greeting = "Hello"
@@ -1225,6 +1257,249 @@ class TestSingletonInheritance(AsyncTestCase):
 
         result = await _run(_Inner)
         self.assertTrue(result.was_successful)
+
+
+# ===================================================================== #
+#  Parameterised singleton tests (subclass with fixed args)
+# ===================================================================== #
+
+
+class TestParameterisedSingletonSubclass(AsyncTestCase):
+    async def test_subclass_receives_constructor_args(self) -> None:
+        """A subclass that passes fixed args to super().__init__() works."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(CounterFrom10)
+
+            async def test_value(self) -> None:
+                self.assertEqual(self.ctr.value, 10)
+                self.assertEqual(self.ctr.step, 1)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_subclass_receives_keyword_args(self) -> None:
+        """A subclass that passes keyword args to super().__init__() works."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(CounterBy5)
+
+            async def test_step(self) -> None:
+                self.ctr.increment()
+                self.assertEqual(self.ctr.value, 5)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_different_subclasses_are_distinct(self) -> None:
+        """Two subclasses of the same base create separate instances."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            from10 = singleton(CounterFrom10)
+            by5 = singleton(CounterBy5)
+
+            async def test_distinct(self) -> None:
+                self.assertIsNot(self.from10, self.by5)
+                self.assertEqual(self.from10.value, 10)
+                self.assertEqual(self.by5.step, 5)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_subclass_shared_across_classes(self) -> None:
+        """The same parameterised subclass is shared across test classes."""
+
+        class _A(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(CounterFrom10)
+
+            async def test_a(self) -> None:
+                self.assertIsInstance(self.ctr, CounterFrom10)
+
+        class _B(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(CounterFrom10)
+
+            async def test_b(self) -> None:
+                self.assertIsInstance(self.ctr, CounterFrom10)
+                self.assertIs(self.ctr, _A.ctr)  # type: ignore[attr-defined]
+
+        result = await _run(_A, _B)
+        self.assertTrue(result.was_successful)
+
+    async def test_subclass_and_base_are_distinct(self) -> None:
+        """A parameterised subclass and its base class are separate singletons."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            base = singleton(ConfigurableCounter)
+            from10 = singleton(CounterFrom10)
+
+            async def test_distinct(self) -> None:
+                self.assertIsNot(self.base, self.from10)
+                self.assertEqual(self.base.value, 0)
+                self.assertEqual(self.from10.value, 10)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_subclass_as_dependency(self) -> None:
+        """A parameterised singleton can be used as a dependency of another singleton."""
+
+        class _Consumer(Singleton):
+            ctr = singleton(CounterFrom10)
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(CounterFrom10)
+            consumer = singleton(_Consumer)
+
+            async def test_dep(self) -> None:
+                self.assertIs(self.consumer.ctr, self.ctr)
+                self.assertEqual(self.ctr.value, 10)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_inline_subclass(self) -> None:
+        """A parameterised singleton defined inline in a test works."""
+
+        class _CounterFrom42(ConfigurableCounter, start=42, step=3):
+            pass
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(_CounterFrom42)
+
+            async def test_inline(self) -> None:
+                self.assertEqual(self.ctr.value, 42)
+                self.ctr.increment()
+                self.assertEqual(self.ctr.value, 45)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+
+# ===================================================================== #
+#  Parameterised singleton tests (inline args)
+# ===================================================================== #
+
+
+class TestParameterisedSingletonInline(AsyncTestCase):
+    async def test_kwargs_forwarded_to_init_subclass(self) -> None:
+        """singleton(cls, kwarg=value) forwards kwargs to __init_subclass__."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(ConfigurableCounter, start=10)
+
+            async def test_value(self) -> None:
+                self.assertEqual(self.ctr.value, 10)
+                self.assertEqual(self.ctr.step, 1)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_multiple_kwargs(self) -> None:
+        """Multiple keyword args are forwarded correctly."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(ConfigurableCounter, start=0, step=5)
+
+            async def test_step(self) -> None:
+                self.ctr.increment()
+                self.assertEqual(self.ctr.value, 5)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_same_kwargs_shared_across_classes(self) -> None:
+        """Same class + kwargs across test classes share one instance."""
+
+        class _A(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(ConfigurableCounter, start=10)
+
+            async def test_a(self) -> None:
+                pass
+
+        class _B(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(ConfigurableCounter, start=10)
+
+            async def test_b(self) -> None:
+                self.assertIs(self.ctr, _A.ctr)  # type: ignore[attr-defined]
+
+        result = await _run(_A, _B)
+        self.assertTrue(result.was_successful)
+
+    async def test_different_kwargs_create_distinct_instances(self) -> None:
+        """Different kwargs for the same class create separate instances."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            a = singleton(ConfigurableCounter, start=10)
+            b = singleton(ConfigurableCounter, start=20)
+
+            async def test_distinct(self) -> None:
+                self.assertIsNot(self.a, self.b)
+                self.assertEqual(self.a.value, 10)
+                self.assertEqual(self.b.value, 20)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_inline_and_bare_are_distinct(self) -> None:
+        """singleton(cls, kwarg=v) and singleton(cls) create separate instances."""
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            bare = singleton(ConfigurableCounter)
+            from10 = singleton(ConfigurableCounter, start=10)
+
+            async def test_distinct(self) -> None:
+                self.assertIsNot(self.bare, self.from10)
+                self.assertEqual(self.bare.value, 0)
+                self.assertEqual(self.from10.value, 10)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_inline_as_dependency(self) -> None:
+        """An inline-parameterised singleton can be a dependency."""
+
+        class _Consumer(Singleton):
+            ctr = singleton(ConfigurableCounter, start=10)
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+            ctr = singleton(ConfigurableCounter, start=10)
+            consumer = singleton(_Consumer)
+
+            async def test_dep(self) -> None:
+                self.assertIs(self.consumer.ctr, self.ctr)
+                self.assertEqual(self.ctr.value, 10)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+
+    async def test_unhashable_kwarg_raises(self) -> None:
+        """Unhashable keyword arguments raise TypeError."""
+        with self.assertRaises(TypeError) as ctx:
+            singleton(ConfigurableCounter, start=[1, 2])  # type: ignore[arg-type]
+        self.assertIn("not hashable", str(ctx.exception))
+        self.assertIn("'start'", str(ctx.exception))
+
+    async def test_generated_type_has_readable_qualname(self) -> None:
+        """The generated subclass has a qualname that includes the arguments."""
+        desc = singleton(ConfigurableCounter, start=10, step=2)
+        self.assertIn("ConfigurableCounter", desc.cls.__qualname__)
+        self.assertIn("start=10", desc.cls.__qualname__)
+        self.assertIn("step=2", desc.cls.__qualname__)
 
 
 # ===================================================================== #

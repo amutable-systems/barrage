@@ -279,3 +279,61 @@ class MyTests(AsyncTestCase):
 
 Multiple test classes that reference the same singleton class share a
 single instance.
+
+### Parameterised singletons
+
+When a singleton needs configuration, define `__init_subclass__` to
+accept keyword arguments. Configuration is captured at class
+definition time; heavy initialization happens later in `__aenter__`.
+
+```python
+class Database(Singleton):
+    url: str
+
+    def __init_subclass__(cls, *, url: str, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.url = url
+
+    async def __aenter__(self) -> Self:
+        self.conn = await connect(self.url)
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.conn.close()
+```
+
+Create named configurations using the class keyword syntax (fully
+statically typed):
+
+```python
+class TestDB(Database, url="postgres://localhost/test"):
+    pass
+
+class StagingDB(Database, url="postgres://staging/app"):
+    pass
+
+class SchemaTests(AsyncTestCase):
+    db = singleton(TestDB)
+
+class MigrationTests(AsyncTestCase):
+    test_db = singleton(TestDB)       # same instance as SchemaTests.db
+    staging_db = singleton(StagingDB) # separate instance
+```
+
+Or pass keyword arguments directly to `singleton()` for a more
+compact inline syntax:
+
+```python
+class SchemaTests(AsyncTestCase):
+    db = singleton(Database, url="postgres://localhost/test")
+
+class MigrationTests(AsyncTestCase):
+    test_db = singleton(Database, url="postgres://localhost/test")  # same instance
+    staging_db = singleton(Database, url="postgres://staging/app")  # separate
+```
+
+The inline form creates a subclass under the hood via
+`__init_subclass__`. Identical `(cls, kwargs)` combinations produce
+the same subclass, so deduplication works as usual. All values must
+be hashable. The generated type gets a readable name like
+`Database[url='postgres://localhost/test']`.
