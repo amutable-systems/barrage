@@ -116,7 +116,8 @@ async def test_addition() -> None:
 ```
 
 Function tests are discovered alongside class-based tests and run
-concurrently.
+concurrently. They don't have setUp/tearDown lifecycle hooks; use
+`AsyncExitStack` injection (see below) for resource management.
 
 #### Assertions
 
@@ -155,6 +156,33 @@ async def test_example() -> None:
 | `raises(E)` | context manager |
 | `fail(msg)` | unconditional failure |
 | `skip(reason)` | skip the test |
+
+#### `AsyncExitStack` injection
+
+Any test — function or class method — that declares an
+`AsyncExitStack` parameter gets a fresh one injected automatically.
+The stack is cleaned up after the test finishes, even on failure:
+
+```python
+from contextlib import AsyncExitStack
+
+async def test_resource(stack: AsyncExitStack) -> None:
+    conn = await stack.enter_async_context(connect_db())
+    assert conn.is_open()
+    # conn is closed automatically when the test ends
+```
+
+This also works on class test methods:
+
+```python
+class MyTests(AsyncTestCase):
+    async def test_resource(self, stack: AsyncExitStack) -> None:
+        conn = await stack.enter_async_context(connect_db())
+        self.assertTrue(conn.is_open())
+```
+
+Each test gets its own independent stack — there is no sharing
+between tests.
 
 ### Concurrency model
 

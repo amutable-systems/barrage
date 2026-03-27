@@ -549,6 +549,18 @@ class _FailFast(Exception):
     """Raised when failfast is enabled and a test fails or errors."""
 
 
+def _exit_stack_param(func: Callable[..., Coroutine[Any, Any, None]]) -> str | None:
+    """Return the parameter name annotated as ``AsyncExitStack``, or ``None``."""
+    try:
+        hints = inspect.get_annotations(func, eval_str=True)
+    except Exception:
+        return None
+    for name, ann in hints.items():
+        if ann is contextlib.AsyncExitStack:
+            return name
+    return None
+
+
 async def _run_single_test(
     cls: type[AsyncTestCase],
     method_name: str,
@@ -646,6 +658,12 @@ async def _run_single_test(
                 raise _FailFast() from None
             return
 
+        # ── per-test exit stack injection ─────────────────────────
+        es_param = _exit_stack_param(method)
+        method_kwargs: dict[str, Any] = {}
+        if es_param is not None:
+            method_kwargs[es_param] = await stack.enter_async_context(contextlib.AsyncExitStack())
+
         # ── test method + tearDown ───────────────────────────────
         # tearDown runs in a finally so it executes even on cancellation.
         test_exc: BaseException | None = None
@@ -655,7 +673,7 @@ async def _run_single_test(
         teardown_exc: BaseException | None = None
         try:
             try:
-                await method()
+                await method(**method_kwargs)
             except asyncio.CancelledError as exc:
                 cancelled_exc = exc
             except SkipTest as exc:
@@ -814,13 +832,19 @@ async def _run_single_function(
 
         t0 = time.monotonic()
 
+        # ── per-test exit stack injection ─────────────────────────
+        func_kwargs: dict[str, Any] = dict(singleton_kwargs or {})
+        es_param = _exit_stack_param(func)
+        if es_param is not None:
+            func_kwargs[es_param] = await stack.enter_async_context(contextlib.AsyncExitStack())
+
         # ── call the function ────────────────────────────────────
         test_exc: BaseException | None = None
         test_is_skip = False
         test_is_failure = False
         cancelled_exc: asyncio.CancelledError | None = None
         try:
-            await func(**(singleton_kwargs or {}))
+            await func(**func_kwargs)
         except asyncio.CancelledError as exc:
             cancelled_exc = exc
         except SkipTest as exc:

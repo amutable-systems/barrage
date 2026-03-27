@@ -2857,6 +2857,146 @@ class TestFunctionTests(AsyncTestCase, concurrent=True):
 
 
 # ===================================================================== #
+#  AsyncExitStack injection
+# ===================================================================== #
+
+
+class TestExitStackInjection(AsyncTestCase, concurrent=True):
+    async def test_function_receives_exit_stack(self) -> None:
+        """A function with AsyncExitStack annotation gets one injected."""
+        received: list[object] = []
+
+        async def test_fn(stack: contextlib.AsyncExitStack) -> None:
+            received.append(stack)
+
+        result = await _run_functions(test_fn)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(len(received), 1)
+        self.assertIsInstance(received[0], contextlib.AsyncExitStack)
+
+    async def test_exit_stack_cleanup_on_success(self) -> None:
+        """The injected exit stack is cleaned up after the test passes."""
+        cleaned_up = False
+
+        class _CM:
+            async def __aenter__(self) -> None:
+                pass
+
+            async def __aexit__(self, *exc: object) -> None:
+                nonlocal cleaned_up
+                cleaned_up = True
+
+        async def test_fn(stack: contextlib.AsyncExitStack) -> None:
+            await stack.enter_async_context(_CM())
+
+        result = await _run_functions(test_fn)
+        self.assertTrue(result.was_successful)
+        self.assertTrue(cleaned_up)
+
+    async def test_exit_stack_cleanup_on_failure(self) -> None:
+        """The injected exit stack is cleaned up even when the test fails."""
+        cleaned_up = False
+
+        class _CM:
+            async def __aenter__(self) -> None:
+                pass
+
+            async def __aexit__(self, *exc: object) -> None:
+                nonlocal cleaned_up
+                cleaned_up = True
+
+        async def test_fn(stack: contextlib.AsyncExitStack) -> None:
+            await stack.enter_async_context(_CM())
+            raise AssertionError("deliberate")
+
+        result = await _run_functions(test_fn)
+        self.assertFalse(result.was_successful)
+        self.assertTrue(cleaned_up)
+
+    async def test_function_without_exit_stack_still_works(self) -> None:
+        """Functions that don't request an exit stack are unaffected."""
+
+        async def test_fn() -> None:
+            assert 1 + 1 == 2
+
+        result = await _run_functions(test_fn)
+        self.assertTrue(result.was_successful)
+
+    async def test_exit_stack_with_singletons(self) -> None:
+        """Exit stack injection works alongside singleton injection."""
+        from barrage.singleton import Singleton
+
+        class _Counter(Singleton):
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def test_fn(
+            ctr: _Counter,
+            stack: contextlib.AsyncExitStack,
+        ) -> None:
+            assert isinstance(ctr, _Counter)
+            assert isinstance(stack, contextlib.AsyncExitStack)
+
+        result = await _run_functions(test_fn)
+        self.assertTrue(result.was_successful)
+
+    async def test_class_method_receives_exit_stack(self) -> None:
+        """A class test method with AsyncExitStack gets one injected."""
+        received: list[object] = []
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+
+            async def test_with_stack(self, stack: contextlib.AsyncExitStack) -> None:
+                received.append(stack)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(len(received), 1)
+        self.assertIsInstance(received[0], contextlib.AsyncExitStack)
+
+    async def test_class_method_exit_stack_cleanup(self) -> None:
+        """The exit stack injected into a class method is cleaned up."""
+        cleaned_up = False
+
+        class _CM:
+            async def __aenter__(self) -> None:
+                pass
+
+            async def __aexit__(self, *exc: object) -> None:
+                nonlocal cleaned_up
+                cleaned_up = True
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+
+            async def test_use_stack(self, stack: contextlib.AsyncExitStack) -> None:
+                await stack.enter_async_context(_CM())
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertTrue(cleaned_up)
+
+    async def test_each_test_gets_unique_exit_stack(self) -> None:
+        """Each test method gets its own independent exit stack."""
+        stacks: list[object] = []
+
+        class _Inner(AsyncTestCase):
+            __test__ = False
+
+            async def test_a(self, stack: contextlib.AsyncExitStack) -> None:
+                stacks.append(stack)
+
+            async def test_b(self, stack: contextlib.AsyncExitStack) -> None:
+                stacks.append(stack)
+
+        result = await _run(_Inner)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(len(stacks), 2)
+        self.assertIsNot(stacks[0], stacks[1])
+
+
+# ===================================================================== #
 #  Self-hosting entry point
 # ===================================================================== #
 
