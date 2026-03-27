@@ -22,6 +22,11 @@ Usage::
     # Run a single standalone test function
     python3 -m barrage test/test_example.py::test_function_name
 
+    # Run by name (discovers from current directory)
+    python3 -m barrage TestMyClass
+    python3 -m barrage TestMyClass::test_method
+    python3 -m barrage test_some_function
+
     # Multiple paths at once
     python3 -m barrage test/test_foo.py test/test_bar.py::SomeClass
 
@@ -38,6 +43,7 @@ Usage::
 
 import argparse
 import sys
+from pathlib import Path
 
 from barrage.colorize import should_colorize
 from barrage.discovery import resolve_tests
@@ -110,7 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-t",
         "--top-level-directory",
-        default=None,
+        type=Path,
+        default=Path.cwd(),
         dest="top_level_directory",
         metavar="DIR",
         help=(
@@ -124,24 +131,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "paths",
         nargs="*",
-        default=None,
+        default=["."],
         metavar="path",
         help=(
             "Paths to test files or directories.  A path may be suffixed "
             "with ::ClassName to select a single test class, "
             "::ClassName::test_method to select a single test, or "
             "::function_name to select a standalone test function.  "
+            "A bare name (no path) discovers tests from the current "
+            "directory and filters by class, function, or method name.  "
             "When no paths are given, discovers tests in the current "
             "directory (or -t if set)."
         ),
     )
 
     args = parser.parse_args(argv)
-
-    paths = args.paths if args.paths else [args.top_level_directory or "."]
-    top_level_dir = args.top_level_directory
-
-    suite = resolve_tests(paths, pattern=args.pattern, top_level_dir=top_level_dir)
+    suite = resolve_tests(args.paths, args.top_level_directory, pattern=args.pattern)
 
     if not suite.entries and not suite.functions:
         print("No tests discovered.", file=sys.stderr)

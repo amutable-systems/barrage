@@ -18,6 +18,9 @@ class SamplePassingTests(AsyncTestCase, concurrent=True):
     async def test_string(self) -> None:
         self.assertIn("oo", "foobar")
 
+    async def test_shared_name(self) -> None:
+        self.assertTrue(True)
+
 
 class SampleSequentialTests(AsyncTestCase):
     async def test_seq_a(self) -> None:
@@ -27,6 +30,9 @@ class SampleSequentialTests(AsyncTestCase):
     async def test_seq_b(self) -> None:
         await asyncio.sleep(0)
         self.assertIsNotNone(42)
+
+    async def test_shared_name(self) -> None:
+        self.assertTrue(True)
 
 
 class _InternalHelper(AsyncTestCase):

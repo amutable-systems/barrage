@@ -46,11 +46,12 @@ python3 -m barrage [options] [path ...]
 | `-i`, `--interactive` | Run tests sequentially with no output capture and live per-test status. Useful for debugging. |
 | `--show-output` | Show captured stdout/stderr for all tests, including passing tests. |
 | `-x`, `--failfast` | Stop on the first test failure or error. |
+| `-t`, `--top-level-directory DIR` | Top-level directory for test discovery and imports. Defaults to the current directory. |
 
-Paths may be suffixed with `::ClassName` to select a single test
-class, `::ClassName::test_method` to select a single test method,
-or `::function_name` to select a standalone test function. When no
-paths are given, tests are discovered in the current directory.
+Positional arguments can be **path-based** or **name-based**.
+
+**Path-based** specs point to a file or directory, optionally
+narrowed with `::` selectors:
 
 ```console
 # Discover and run all tests in the current directory
@@ -77,6 +78,30 @@ $ python3 -m barrage test/test_foo.py test/test_bar.py::SomeClass
 # Run a single test interactively for debugging
 $ python3 -m barrage -i test/my_tests.py::MyTests::test_example
 ```
+
+**Name-based** specs select tests by class, method, or function
+name without a file path. The framework discovers all tests under
+the top-level directory (or current directory) and filters by name:
+
+```console
+# Run all tests in a class
+$ python3 -m barrage MyTestClass
+
+# Run a single method of a class
+$ python3 -m barrage MyTestClass::test_method
+
+# Run a standalone test function
+$ python3 -m barrage test_some_function
+
+# Run a unique method name (must appear in exactly one class)
+$ python3 -m barrage test_method_name
+
+# Mix path-based and name-based specs
+$ python3 -m barrage test/test_foo.py::SomeClass MyOtherClass
+```
+
+If a name matches multiple classes, functions, or methods, the
+command exits with an error listing the ambiguous candidates.
 
 ## Writing tests
 

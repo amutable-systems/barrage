@@ -7,38 +7,47 @@ import sys
 import types
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Never, cast
 
 from barrage.case import AsyncTestCase
+from barrage.colorize import ANSI, should_colorize, style
 from barrage.runner import AsyncTestSuite, _collect_test_methods
+
+
+def die(message: str, exitcode: int = 2) -> Never:
+    """Print *message* to stderr and raise ``SystemExit(exitcode)``."""
+    if should_colorize(sys.stderr):
+        message = style(message, ANSI.RED)
+    print(message, file=sys.stderr)
+    raise SystemExit(exitcode)
 
 
 def resolve_tests(
     path_specs: list[str],
+    top_level_dir: Path,
     pattern: str = "test_*.py",
-    top_level_dir: str | None = None,
 ) -> AsyncTestSuite:
     """
     Build an :class:`AsyncTestSuite` from a list of path specifications.
 
-    Each *path_spec* is a string of the form::
+    Each *path_spec* is either a **path-based** or **name-based**
+    selector.
 
-        path[::ClassName[::method_name]]
-        path[::function_name]
+    **Path-based** (the path part must be an existing file or
+    directory)::
 
-    Where *path* may be a directory or a ``.py`` file.
+        path                         # directory or file
+        path::ClassName              # specific class
+        path::ClassName::method      # specific method
+        path::function_name          # specific function
 
-    * **Directory** – recursively discover all test files matching
-      *pattern* (``::`` suffixes are not allowed here).
-    * **File** – import the file and collect all
-      :class:`AsyncTestCase` subclasses and standalone ``async def
-      test_*`` functions.
-    * **File::ClassName** – import the file and collect only the
-      named class.
-    * **File::ClassName::method_name** – import the file and collect
-      only the named method from the named class.
-    * **File::function_name** – import the file and collect only the
-      named standalone test function (if no class matches).
+    **Name-based** (no path prefix — discovers from *top_level_dir*
+    or the current directory and filters by name)::
+
+        ClassName                    # all methods of that class
+        ClassName::method            # specific method
+        test_function_name           # standalone function
+        test_method_name             # method (must be unique)
 
     Parameters
     ----------
@@ -49,9 +58,8 @@ def resolve_tests(
         discovery (default ``test_*.py``).
     top_level_dir:
         Top-level directory of the project, used as the import root
-        for discovered modules.  When ``None``, directory discovery
-        uses *start_dir* and file discovery uses the current working
-        directory.
+        for discovered modules and as the search root for name-based
+        specs.
 
     Returns
     -------
@@ -67,55 +75,64 @@ def resolve_tests(
         ``SystemExit(2)`` is raised.
     """
     suite = AsyncTestSuite()
-    top = Path(top_level_dir) if top_level_dir else None
+
+    # Separate path-based specs from name-based specs.  A spec is
+    # name-based only if the path part contains no slashes (i.e. it
+    # looks like a bare identifier, not a file path).
+    path_based: list[str] = []
+    name_based: list[str] = []
 
     for spec in path_specs:
+        path_str = spec.split("::")[0]
+        if os.sep in path_str:
+            path_based.append(spec)
+        else:
+            # Resolve against the top-level directory.
+            p = top_level_dir / path_str
+            if p.is_dir() or p.is_file():
+                path_based.append(spec)
+            else:
+                name_based.append(spec)
+
+    # ── process path-based specs ─────────────────────────────────
+    for spec in path_based:
         parts = spec.split("::")
         path_str = parts[0]
         class_name: str | None = parts[1] if len(parts) > 1 else None
         method_name: str | None = parts[2] if len(parts) > 2 else None
 
         if len(parts) > 3:
-            print(
-                f"Error: invalid test spec {spec!r} – expected path[::Class[::method]]",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
+            die(f"Error: invalid test spec {spec!r} – expected path[::Class[::method]]")
 
-        p = Path(path_str)
+        p = (top_level_dir / path_str).resolve()
 
-        # When a top-level directory is set and the path is not
-        # absolute, resolve it relative to that directory so that
-        # ``-t test test_file.py::Class`` finds ``test/test_file.py``.
-        if top and not p.is_absolute() and not p.exists():
-            candidate = top / p
-            if candidate.exists():
-                p = candidate
+        if not p.exists():
+            die(f"Error: path does not exist: {path_str!r}")
+
+        resolved_top = top_level_dir.resolve()
+        try:
+            p.relative_to(resolved_top)
+        except ValueError:
+            die(f"Error: path {path_str!r} is not inside top-level directory {str(resolved_top)!r}")
 
         if p.is_dir():
             if class_name is not None:
-                print(
-                    f"Error: cannot use ::ClassName filter on a directory: {spec!r}",
-                    file=sys.stderr,
-                )
-                raise SystemExit(2)
-            _discover_directory(p, suite, pattern=pattern, top_level_dir=top)
-
-        elif p.is_file():
+                die(f"Error: cannot use ::ClassName filter on a directory: {spec!r}")
+            _discover_directory(p, suite, pattern=pattern, top_level_dir=top_level_dir)
+        else:
             _discover_file(
                 p,
                 suite,
+                top_level_dir=top_level_dir,
                 class_name=class_name,
                 method_name=method_name,
-                top_level_dir=top,
             )
 
-        else:
-            print(
-                f"Error: path does not exist: {path_str!r}",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
+    # ── process name-based specs ─────────────────────────────────
+    if name_based:
+        full = AsyncTestSuite()
+        _discover_directory(top_level_dir.resolve(), full, pattern=pattern, top_level_dir=top_level_dir)
+        _resolve_name_specs(name_based, full, suite)
 
     return suite
 
@@ -126,9 +143,9 @@ def resolve_tests(
 
 
 def discover(
-    start_dir: str | Path,
+    start_dir: Path,
+    top_level_dir: Path,
     pattern: str = "test_*.py",
-    top_level_dir: str | Path | None = None,
 ) -> AsyncTestSuite:
     """
     Discover ``AsyncTestCase`` subclasses by walking *start_dir* and
@@ -138,12 +155,12 @@ def discover(
     ----------
     start_dir:
         Directory to start searching from.
+    top_level_dir:
+        The top-level directory of the project, inserted into
+        ``sys.path`` so that test modules can be imported by their
+        dotted package path.
     pattern:
         Glob pattern for test file names (default ``test_*.py``).
-    top_level_dir:
-        The top-level directory of the project.  If given, it is inserted
-        into ``sys.path`` so that test modules can be imported by their
-        dotted package path.  When ``None``, *start_dir* is used.
 
     Returns
     -------
@@ -152,10 +169,10 @@ def discover(
     """
     suite = AsyncTestSuite()
     _discover_directory(
-        Path(start_dir),
+        start_dir,
         suite,
         pattern=pattern,
-        top_level_dir=Path(top_level_dir) if top_level_dir else None,
+        top_level_dir=top_level_dir,
     )
     return suite
 
@@ -163,8 +180,8 @@ def discover(
 def _discover_directory(
     start: Path,
     suite: AsyncTestSuite,
+    top_level_dir: Path,
     pattern: str = "test_*.py",
-    top_level_dir: Path | None = None,
 ) -> None:
     """Walk *start* and add every matching test class to *suite*."""
     start = start.resolve()
@@ -199,9 +216,9 @@ def _discover_directory(
 def _discover_file(
     filepath: Path,
     suite: AsyncTestSuite,
+    top_level_dir: Path,
     class_name: str | None = None,
     method_name: str | None = None,
-    top_level_dir: Path | None = None,
 ) -> None:
     """Import *filepath* and add matching test classes/methods to *suite*.
 
@@ -221,21 +238,13 @@ def _discover_file(
     """
     filepath = filepath.resolve()
 
-    # Use the provided top-level directory or fall back to the current
-    # working directory as the import root so that ``test/test_foo.py``
-    # imports as ``test.test_foo``.
-    top = top_level_dir.resolve() if top_level_dir else Path.cwd().resolve()
-    if str(top) not in sys.path:
-        sys.path.insert(0, str(top))
+    if str(top_level_dir) not in sys.path:
+        sys.path.insert(0, str(top_level_dir))
 
     try:
-        module = _import_path(filepath, top)
+        module = _import_path(filepath, top_level_dir)
     except Exception as e:
-        print(
-            f"Error: failed to import {filepath}: {e}",
-            file=sys.stderr,
-        )
-        raise SystemExit(2) from e
+        die(f"Error: failed to import {filepath}: {e}")
 
     if class_name is not None:
         # Look for a specific class.
@@ -250,21 +259,13 @@ def _discover_file(
                     suite.add_function(func)
                     return
 
-            print(
-                f"Error: class or function {class_name!r} not found in {filepath}",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
+            die(f"Error: class or function {class_name!r} not found in {filepath}")
 
         if method_name is not None:
             # Validate that the method exists and is an async test.
             attr = getattr(cls, method_name, None)
             if attr is None or not inspect.iscoroutinefunction(attr):
-                print(
-                    f"Error: async test method {method_name!r} not found on {class_name!r} in {filepath}",
-                    file=sys.stderr,
-                )
-                raise SystemExit(2)
+                die(f"Error: async test method {method_name!r} not found on {class_name!r} in {filepath}")
             suite.add_class(cls, [method_name])
         else:
             methods = _collect_test_methods(cls)
@@ -298,6 +299,103 @@ def discover_module(module: types.ModuleType) -> AsyncTestSuite:
     for func in _find_test_functions(module):
         suite.add_function(func)
     return suite
+
+
+# ===================================================================== #
+#  Name-based test selection
+# ===================================================================== #
+
+
+def _resolve_name_specs(
+    specs: list[str],
+    source: AsyncTestSuite,
+    dest: AsyncTestSuite,
+) -> None:
+    """Resolve name-based specs against a fully discovered *source* suite.
+
+    Each spec is one of:
+
+    * ``ClassName`` — all methods of that class
+    * ``ClassName::method`` — a single method
+    * ``test_function`` — a standalone function
+    * ``test_name`` — a method or function name; must be unique
+
+    Matched entries are added to *dest*.  Raises ``SystemExit(2)`` if
+    a spec matches nothing or matches ambiguously.
+    """
+    entries = source.entries
+    functions = source.functions
+
+    for spec in specs:
+        parts = spec.split("::")
+
+        if len(parts) > 2:
+            die(f"Error: invalid name spec {spec!r} – expected name or Class::method")
+
+        if len(parts) == 2:
+            # Class::method — look for the class by name, then the
+            # method within it.
+            cls_name, method_name = parts
+            _resolve_class_method(cls_name, method_name, entries, dest)
+            continue
+
+        name = parts[0]
+
+        # Try matching as a class name first.
+        class_matches = [(cls, methods) for cls, methods in entries if cls.__name__ == name]
+        # Try matching as a function name.
+        func_matches = [f for f in functions if getattr(f, "__name__", None) == name]
+        # Try matching as a method name across all classes.
+        method_matches: list[tuple[type[AsyncTestCase], str]] = []
+        if not class_matches and not func_matches:
+            for cls, methods in entries:
+                if name in methods:
+                    method_matches.append((cls, name))
+
+        total = len(class_matches) + len(func_matches) + len(method_matches)
+
+        if total == 0:
+            die(f"Error: no test matching {name!r} found")
+
+        if total > 1:
+            candidates: list[str] = []
+            for cls, _methods in class_matches:
+                candidates.append(f"  class {cls.__module__}.{cls.__qualname__}")
+            for f in func_matches:
+                qname = getattr(f, "__qualname__", repr(f))
+                mod = getattr(f, "__module__", "<unknown>")
+                candidates.append(f"  function {mod}.{qname}")
+            for cls, meth in method_matches:
+                candidates.append(f"  method {cls.__qualname__}.{meth}")
+            die(f"Error: {name!r} is ambiguous — matches {total} tests:\n" + "\n".join(candidates))
+
+        if class_matches:
+            cls, methods = class_matches[0]
+            dest.add_class(cls, methods)
+        elif func_matches:
+            dest.add_function(func_matches[0])
+        else:
+            cls, meth = method_matches[0]
+            dest.add_class(cls, [meth])
+
+
+def _resolve_class_method(
+    cls_name: str,
+    method_name: str,
+    entries: list[tuple[type[AsyncTestCase], list[str]]],
+    dest: AsyncTestSuite,
+) -> None:
+    """Resolve ``ClassName::method_name`` against discovered entries."""
+    matches = [(cls, methods) for cls, methods in entries if cls.__name__ == cls_name]
+    if not matches:
+        die(f"Error: no test class matching {cls_name!r} found")
+    if len(matches) > 1:
+        candidates = [f"  {cls.__module__}.{cls.__qualname__}" for cls, _ in matches]
+        die(f"Error: {cls_name!r} is ambiguous — matches {len(matches)} classes:\n" + "\n".join(candidates))
+    cls, methods = matches[0]
+    if method_name not in methods:
+        die(f"Error: {cls_name!r} has no test method {method_name!r}")
+    dest.add_class(cls, [method_name])
 
 
 # ===================================================================== #

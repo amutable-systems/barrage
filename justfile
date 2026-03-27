@@ -12,4 +12,4 @@ fmt:
 	ruff check --fix {{PY_DIRS}}
 
 test *barrage_args:
-	python3 -m barrage {{barrage_args}} {{PY_DIRS}}
+	python3 -m barrage -t ./tests {{barrage_args}}

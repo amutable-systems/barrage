@@ -1062,11 +1062,8 @@ class TestDiscovery(AsyncTestCase, concurrent=True):
         if not sample_dir.is_dir():
             self.skipTest(f"sample directory missing: {sample_dir}")
 
-        suite = discover(
-            start_dir=str(sample_dir),
-            pattern="test_*.py",
-            top_level_dir=str(Path(__file__).resolve().parents[2]),
-        )
+        top_dir = Path(__file__).resolve().parents[2]
+        suite = discover(sample_dir, top_dir)
 
         entries = suite.entries
         class_names = sorted(cls.__name__ for cls, _methods in entries)
@@ -1077,22 +1074,19 @@ class TestDiscovery(AsyncTestCase, concurrent=True):
         runner = AsyncTestRunner(verbosity=0)
         result = await runner.run_suite_async(suite)
         self.assertTrue(result.was_successful)
-        self.assertEqual(result.tests_run, 4)
+        self.assertEqual(result.tests_run, 6)
 
     async def test_discover_respects_pattern(self) -> None:
         sample_dir = Path(__file__).parent / "_sample_discover"
         if not sample_dir.is_dir():
             self.skipTest(f"sample directory missing: {sample_dir}")
 
-        suite = discover(
-            start_dir=str(sample_dir),
-            pattern="check_*.py",
-            top_level_dir=str(Path(__file__).resolve().parents[2]),
-        )
+        top_dir = Path(__file__).resolve().parents[2]
+        suite = discover(sample_dir, top_dir, pattern="check_*.py")
         self.assertEqual(len(suite.entries), 0)
 
     async def test_discover_nonexistent_dir(self) -> None:
-        suite = discover("/tmp/_barrage_no_such_dir_12345")
+        suite = discover(Path("/tmp/_barrage_no_such_dir_12345"), Path("/tmp"))
         self.assertEqual(len(suite.entries), 0)
 
     async def test_discover_module(self) -> None:
@@ -1113,39 +1107,39 @@ class TestDiscovery(AsyncTestCase, concurrent=True):
 class TestResolveTests(AsyncTestCase, concurrent=True):
     """Tests for the ``resolve_tests()`` path-spec resolution function."""
 
-    _sample_dir: str
-    _sample_file: str
-    _top_dir: str
+    _sample_dir: Path
+    _sample_file: Path
+    _top_dir: Path
 
     @classmethod
     async def setUpClass(cls) -> None:
-        cls._sample_dir = str(Path(__file__).parent / "_sample_discover")
-        cls._sample_file = str(Path(__file__).parent / "_sample_discover" / "test_sample.py")
-        cls._top_dir = str(Path(__file__).resolve().parents[1])
+        cls._sample_dir = Path(__file__).parent / "_sample_discover"
+        cls._sample_file = Path(__file__).parent / "_sample_discover" / "test_sample.py"
+        cls._top_dir = Path(__file__).resolve().parents[1]
 
     # ── directory ─────────────────────────────────────────────────────
 
     async def test_resolve_directory(self) -> None:
         """A bare directory discovers all test classes inside it."""
-        suite = resolve_tests([self._sample_dir])
+        suite = resolve_tests([str(self._sample_dir)], self._top_dir)
         class_names = sorted(cls.__name__ for cls, _ in suite.entries)
         self.assertIn("SamplePassingTests", class_names)
         self.assertIn("SampleSequentialTests", class_names)
         self.assertNotIn("_InternalHelper", class_names)
 
         total_methods = sum(len(m) for _, m in suite.entries)
-        self.assertEqual(total_methods, 4)
+        self.assertEqual(total_methods, 6)
 
     async def test_resolve_directory_with_pattern(self) -> None:
         """The pattern parameter filters which files are picked up."""
-        suite = resolve_tests([self._sample_dir], pattern="check_*.py")
+        suite = resolve_tests([str(self._sample_dir)], self._top_dir, pattern="check_*.py")
         self.assertEqual(len(suite.entries), 0)
 
     # ── single file ───────────────────────────────────────────────────
 
     async def test_resolve_file(self) -> None:
         """A bare file path discovers all test classes in that file."""
-        suite = resolve_tests([self._sample_file])
+        suite = resolve_tests([str(self._sample_file)], self._top_dir)
         class_names = sorted(cls.__name__ for cls, _ in suite.entries)
         self.assertIn("SamplePassingTests", class_names)
         self.assertIn("SampleSequentialTests", class_names)
@@ -1153,43 +1147,43 @@ class TestResolveTests(AsyncTestCase, concurrent=True):
 
     async def test_resolve_file_runs_successfully(self) -> None:
         """Tests discovered from a file can actually be executed."""
-        suite = resolve_tests([self._sample_file])
+        suite = resolve_tests([str(self._sample_file)], self._top_dir)
         runner = AsyncTestRunner(verbosity=0)
         result = await runner.run_suite_async(suite)
         self.assertTrue(result.was_successful)
-        self.assertEqual(result.tests_run, 4)
+        self.assertEqual(result.tests_run, 6)
 
     # ── file::ClassName ───────────────────────────────────────────────
 
     async def test_resolve_file_class(self) -> None:
         """``file::ClassName`` discovers only the named class."""
-        suite = resolve_tests([f"{self._sample_file}::SamplePassingTests"])
+        suite = resolve_tests([f"{self._sample_file}::SamplePassingTests"], self._top_dir)
         self.assertEqual(len(suite.entries), 1)
         cls, methods = suite.entries[0]
         self.assertEqual(cls.__name__, "SamplePassingTests")
-        self.assertEqual(sorted(methods), ["test_add", "test_string"])
+        self.assertEqual(sorted(methods), ["test_add", "test_shared_name", "test_string"])
 
     async def test_resolve_file_class_other(self) -> None:
         """Selecting a different class works the same way."""
-        suite = resolve_tests([f"{self._sample_file}::SampleSequentialTests"])
+        suite = resolve_tests([f"{self._sample_file}::SampleSequentialTests"], self._top_dir)
         self.assertEqual(len(suite.entries), 1)
         cls, methods = suite.entries[0]
         self.assertEqual(cls.__name__, "SampleSequentialTests")
-        self.assertEqual(sorted(methods), ["test_seq_a", "test_seq_b"])
+        self.assertEqual(sorted(methods), ["test_seq_a", "test_seq_b", "test_shared_name"])
 
     async def test_resolve_file_class_runs_successfully(self) -> None:
         """A class-filtered suite can actually be executed."""
-        suite = resolve_tests([f"{self._sample_file}::SamplePassingTests"])
+        suite = resolve_tests([f"{self._sample_file}::SamplePassingTests"], self._top_dir)
         runner = AsyncTestRunner(verbosity=0)
         result = await runner.run_suite_async(suite)
         self.assertTrue(result.was_successful)
-        self.assertEqual(result.tests_run, 2)
+        self.assertEqual(result.tests_run, 3)
 
     # ── file::ClassName::method ───────────────────────────────────────
 
     async def test_resolve_file_class_method(self) -> None:
         """``file::Class::method`` discovers only that single method."""
-        suite = resolve_tests([f"{self._sample_file}::SamplePassingTests::test_add"])
+        suite = resolve_tests([f"{self._sample_file}::SamplePassingTests::test_add"], self._top_dir)
         self.assertEqual(len(suite.entries), 1)
         cls, methods = suite.entries[0]
         self.assertEqual(cls.__name__, "SamplePassingTests")
@@ -1197,7 +1191,7 @@ class TestResolveTests(AsyncTestCase, concurrent=True):
 
     async def test_resolve_file_class_method_runs_successfully(self) -> None:
         """A method-filtered suite can actually be executed."""
-        suite = resolve_tests([f"{self._sample_file}::SamplePassingTests::test_add"])
+        suite = resolve_tests([f"{self._sample_file}::SamplePassingTests::test_add"], self._top_dir)
         runner = AsyncTestRunner(verbosity=0)
         result = await runner.run_suite_async(suite)
         self.assertTrue(result.was_successful)
@@ -1211,7 +1205,8 @@ class TestResolveTests(AsyncTestCase, concurrent=True):
             [
                 f"{self._sample_file}::SamplePassingTests::test_add",
                 f"{self._sample_file}::SampleSequentialTests::test_seq_a",
-            ]
+            ],
+            self._top_dir,
         )
         self.assertEqual(len(suite.entries), 2)
         all_methods = [m for _, methods in suite.entries for m in methods]
@@ -1225,55 +1220,56 @@ class TestResolveTests(AsyncTestCase, concurrent=True):
             [
                 f"{self._sample_file}::SamplePassingTests",
                 f"{self._sample_file}::SampleSequentialTests::test_seq_b",
-            ]
+            ],
+            self._top_dir,
         )
         runner = AsyncTestRunner(verbosity=0)
         result = await runner.run_suite_async(suite)
         self.assertTrue(result.was_successful)
         # SamplePassingTests has 2 methods + 1 from SampleSequentialTests
-        self.assertEqual(result.tests_run, 3)
+        self.assertEqual(result.tests_run, 4)
 
     # ── error cases ───────────────────────────────────────────────────
 
     async def test_resolve_nonexistent_path(self) -> None:
         """A path that does not exist causes SystemExit(2)."""
         with self.assertRaises(SystemExit) as ctx:
-            resolve_tests(["/tmp/_barrage_no_such_file_99999.py"])
+            resolve_tests(["/tmp/_barrage_no_such_file_99999.py"], self._top_dir)
         assert isinstance(ctx.exception, SystemExit)
         self.assertEqual(ctx.exception.code, 2)
 
     async def test_resolve_nonexistent_class(self) -> None:
         """``file::NoSuchClass`` causes SystemExit(2)."""
         with self.assertRaises(SystemExit) as ctx:
-            resolve_tests([f"{self._sample_file}::NoSuchClass"])
+            resolve_tests([f"{self._sample_file}::NoSuchClass"], self._top_dir)
         assert isinstance(ctx.exception, SystemExit)
         self.assertEqual(ctx.exception.code, 2)
 
     async def test_resolve_nonexistent_method(self) -> None:
         """``file::Class::no_such_method`` causes SystemExit(2)."""
         with self.assertRaises(SystemExit) as ctx:
-            resolve_tests([f"{self._sample_file}::SamplePassingTests::no_such_method"])
+            resolve_tests([f"{self._sample_file}::SamplePassingTests::no_such_method"], self._top_dir)
         assert isinstance(ctx.exception, SystemExit)
         self.assertEqual(ctx.exception.code, 2)
 
     async def test_resolve_class_filter_on_directory(self) -> None:
         """``directory::ClassName`` is not allowed and causes SystemExit(2)."""
         with self.assertRaises(SystemExit) as ctx:
-            resolve_tests([f"{self._sample_dir}::SomeClass"])
+            resolve_tests([f"{self._sample_dir}::SomeClass"], self._top_dir)
         assert isinstance(ctx.exception, SystemExit)
         self.assertEqual(ctx.exception.code, 2)
 
     async def test_resolve_too_many_separators(self) -> None:
         """More than two ``::`` separators causes SystemExit(2)."""
         with self.assertRaises(SystemExit) as ctx:
-            resolve_tests([f"{self._sample_file}::SamplePassingTests::test_add::extra"])
+            resolve_tests([f"{self._sample_file}::SamplePassingTests::test_add::extra"], self._top_dir)
         assert isinstance(ctx.exception, SystemExit)
         self.assertEqual(ctx.exception.code, 2)
 
     async def test_resolve_explicit_test_false_class(self) -> None:
         """``__test__ = False`` classes are excluded from directory discovery
         but *can* be selected explicitly by name."""
-        suite = resolve_tests([f"{self._sample_file}::_InternalHelper"])
+        suite = resolve_tests([f"{self._sample_file}::_InternalHelper"], self._top_dir)
         self.assertEqual(len(suite.entries), 1)
         cls, methods = suite.entries[0]
         self.assertEqual(cls.__name__, "_InternalHelper")
@@ -1285,7 +1281,7 @@ class TestResolveTests(AsyncTestCase, concurrent=True):
         # it exists as an attribute but is a module, not an
         # AsyncTestCase subclass.
         with self.assertRaises(SystemExit) as ctx:
-            resolve_tests([f"{self._sample_file}::asyncio"])
+            resolve_tests([f"{self._sample_file}::asyncio"], self._top_dir)
         assert isinstance(ctx.exception, SystemExit)
         self.assertEqual(ctx.exception.code, 2)
 
@@ -1293,16 +1289,16 @@ class TestResolveTests(AsyncTestCase, concurrent=True):
 
     async def test_resolve_top_level_dir_discovers_directory(self) -> None:
         """``top_level_dir`` used as discovery root when passed as path."""
-        suite = resolve_tests([self._sample_dir], top_level_dir=self._sample_dir)
+        suite = resolve_tests([str(self._sample_dir)], self._sample_dir)
         class_names = sorted(cls.__name__ for cls, _ in suite.entries)
         self.assertIn("SamplePassingTests", class_names)
         self.assertIn("SampleSequentialTests", class_names)
         total_methods = sum(len(m) for _, m in suite.entries)
-        self.assertEqual(total_methods, 4)
+        self.assertEqual(total_methods, 6)
 
     async def test_resolve_top_level_dir_relative_file(self) -> None:
         """A relative file path is resolved against ``top_level_dir``."""
-        suite = resolve_tests(["test_sample.py"], top_level_dir=self._sample_dir)
+        suite = resolve_tests(["test_sample.py"], self._sample_dir)
         class_names = sorted(cls.__name__ for cls, _ in suite.entries)
         self.assertIn("SamplePassingTests", class_names)
         self.assertIn("SampleSequentialTests", class_names)
@@ -1311,42 +1307,148 @@ class TestResolveTests(AsyncTestCase, concurrent=True):
         """A relative ``file::Class`` spec is resolved against ``top_level_dir``."""
         suite = resolve_tests(
             ["test_sample.py::SamplePassingTests"],
-            top_level_dir=self._sample_dir,
+            self._sample_dir,
         )
         self.assertEqual(len(suite.entries), 1)
         cls, methods = suite.entries[0]
         self.assertEqual(cls.__name__, "SamplePassingTests")
-        self.assertEqual(len(methods), 2)
+        self.assertEqual(len(methods), 3)
 
     async def test_resolve_top_level_dir_relative_file_with_method(self) -> None:
         """A relative ``file::Class::method`` spec is resolved against ``top_level_dir``."""
         suite = resolve_tests(
             ["test_sample.py::SamplePassingTests::test_add"],
-            top_level_dir=self._sample_dir,
+            self._sample_dir,
         )
         self.assertEqual(len(suite.entries), 1)
         cls, methods = suite.entries[0]
         self.assertEqual(cls.__name__, "SamplePassingTests")
         self.assertEqual(methods, ["test_add"])
 
-    async def test_resolve_top_level_dir_absolute_path_ignores_top(self) -> None:
-        """An absolute path is not resolved against ``top_level_dir``."""
-        suite = resolve_tests(
-            [self._sample_file],
-            top_level_dir="/tmp/_barrage_no_such_dir_99999",
-        )
-        class_names = sorted(cls.__name__ for cls, _ in suite.entries)
-        self.assertIn("SamplePassingTests", class_names)
-
-    async def test_resolve_top_level_dir_relative_not_found(self) -> None:
-        """A relative path that doesn't exist in either cwd or top dir gives SystemExit(2)."""
+    async def test_resolve_top_level_dir_absolute_outside_exits(self) -> None:
+        """An absolute path outside top_level_dir causes SystemExit(2)."""
         with self.assertRaises(SystemExit) as ctx:
             resolve_tests(
-                ["no_such_file_99999.py"],
-                top_level_dir=self._sample_dir,
+                ["/tmp/_barrage_no_such_file_99999.py"],
+                self._sample_dir,
             )
         assert isinstance(ctx.exception, SystemExit)
         self.assertEqual(ctx.exception.code, 2)
+
+    async def test_resolve_top_level_dir_relative_not_found(self) -> None:
+        """A relative path that doesn't exist under top_level_dir gives SystemExit(2)."""
+        with self.assertRaises(SystemExit) as ctx:
+            resolve_tests(["no_such_file_99999.py"], self._sample_dir)
+        assert isinstance(ctx.exception, SystemExit)
+        self.assertEqual(ctx.exception.code, 2)
+
+
+# ===================================================================== #
+#  Name-based test selection
+# ===================================================================== #
+
+
+class TestNameBasedSelection(AsyncTestCase, concurrent=True):
+    """Tests for name-based (no path) test selection via resolve_tests."""
+
+    _sample_dir: Path
+
+    @classmethod
+    async def setUpClass(cls) -> None:
+        cls._sample_dir = Path(__file__).parent / "_sample_discover"
+
+    async def test_select_class_by_name(self) -> None:
+        """A bare class name selects all methods of that class."""
+        suite = resolve_tests(["SamplePassingTests"], self._sample_dir)
+        self.assertEqual(len(suite.entries), 1)
+        cls, methods = suite.entries[0]
+        self.assertEqual(cls.__name__, "SamplePassingTests")
+        self.assertEqual(sorted(methods), ["test_add", "test_shared_name", "test_string"])
+
+    async def test_select_class_method_by_name(self) -> None:
+        """``ClassName::method`` selects a single method."""
+        suite = resolve_tests(["SamplePassingTests::test_add"], self._sample_dir)
+        self.assertEqual(len(suite.entries), 1)
+        cls, methods = suite.entries[0]
+        self.assertEqual(cls.__name__, "SamplePassingTests")
+        self.assertEqual(methods, ["test_add"])
+
+    async def test_select_unique_method_by_name(self) -> None:
+        """A bare method name selects that method if unique."""
+        # test_seq_a only exists on SampleSequentialTests.
+        suite = resolve_tests(["test_seq_a"], self._sample_dir)
+        self.assertEqual(len(suite.entries), 1)
+        cls, methods = suite.entries[0]
+        self.assertEqual(cls.__name__, "SampleSequentialTests")
+        self.assertEqual(methods, ["test_seq_a"])
+
+    async def test_select_runs_successfully(self) -> None:
+        """Name-selected tests can actually be executed."""
+        suite = resolve_tests(["SamplePassingTests"], self._sample_dir)
+        runner = AsyncTestRunner(verbosity=0)
+        result = await runner.run_suite_async(suite)
+        self.assertTrue(result.was_successful)
+        self.assertEqual(result.tests_run, 3)
+
+    async def test_nonexistent_name_exits(self) -> None:
+        """A name that matches nothing causes SystemExit(2)."""
+        with self.assertRaises(SystemExit) as ctx:
+            resolve_tests(["NoSuchTestAnywhere"], self._sample_dir)
+        assert isinstance(ctx.exception, SystemExit)
+        self.assertEqual(ctx.exception.code, 2)
+
+    async def test_ambiguous_method_name_exits(self) -> None:
+        """A method name present in multiple classes causes SystemExit(2)."""
+        # test_shared_name exists in both SamplePassingTests and
+        # SampleSequentialTests.
+        with self.assertRaises(SystemExit) as ctx:
+            resolve_tests(["test_shared_name"], self._sample_dir)
+        assert isinstance(ctx.exception, SystemExit)
+        self.assertEqual(ctx.exception.code, 2)
+
+    async def test_class_method_nonexistent_method_exits(self) -> None:
+        """``ClassName::no_such_method`` causes SystemExit(2)."""
+        with self.assertRaises(SystemExit) as ctx:
+            resolve_tests(["SamplePassingTests::no_such_method"], self._sample_dir)
+        assert isinstance(ctx.exception, SystemExit)
+        self.assertEqual(ctx.exception.code, 2)
+
+    async def test_class_method_nonexistent_class_exits(self) -> None:
+        """``NoSuchClass::method`` causes SystemExit(2)."""
+        with self.assertRaises(SystemExit) as ctx:
+            resolve_tests(["NoSuchClass::test_add"], self._sample_dir)
+        assert isinstance(ctx.exception, SystemExit)
+        self.assertEqual(ctx.exception.code, 2)
+
+    async def test_mixed_path_and_name_specs(self) -> None:
+        """Path-based and name-based specs can be mixed."""
+        sample_file = str(self._sample_dir / "test_sample.py")
+        suite = resolve_tests(
+            [
+                f"{sample_file}::SamplePassingTests::test_add",
+                "SampleSequentialTests",
+            ],
+            self._sample_dir,
+        )
+        all_methods = [m for _, methods in suite.entries for m in methods]
+        self.assertIn("test_add", all_methods)
+        self.assertIn("test_seq_a", all_methods)
+        self.assertIn("test_seq_b", all_methods)
+
+    async def test_name_based_uses_top_level_dir(self) -> None:
+        """Name-based discovery searches top_level_dir."""
+        suite = resolve_tests(["SamplePassingTests"], self._sample_dir)
+        self.assertEqual(len(suite.entries), 1)
+        cls, methods = suite.entries[0]
+        self.assertEqual(cls.__name__, "SamplePassingTests")
+
+    async def test_name_based_with_top_level_dir_method(self) -> None:
+        """Name-based method selection works with top_level_dir."""
+        suite = resolve_tests(["SamplePassingTests::test_add"], self._sample_dir)
+        self.assertEqual(len(suite.entries), 1)
+        cls, methods = suite.entries[0]
+        self.assertEqual(cls.__name__, "SamplePassingTests")
+        self.assertEqual(methods, ["test_add"])
 
 
 # ===================================================================== #
@@ -1372,7 +1474,7 @@ class TestCLI(AsyncTestCase, concurrent=True):
             )
         stdout_text = result.stdout.decode()
         self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
-        self.assertIn("Ran 4 test(s)", stdout_text)
+        self.assertIn("Ran 6 test(s)", stdout_text)
         self.assertIn("OK", stdout_text)
 
     async def test_main_returns_nonzero_on_no_tests(self) -> None:
@@ -1403,7 +1505,7 @@ class TestCLI(AsyncTestCase, concurrent=True):
             )
         stdout_text = result.stdout.decode()
         self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
-        self.assertIn("Ran 2 test(s)", stdout_text)
+        self.assertIn("Ran 3 test(s)", stdout_text)
         self.assertIn("OK", stdout_text)
 
     async def test_main_file_with_class_and_method(self) -> None:
@@ -1500,7 +1602,7 @@ class TestCLI(AsyncTestCase, concurrent=True):
             )
         stdout_text = result.stdout.decode()
         self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
-        self.assertIn("Ran 4 test(s)", stdout_text)
+        self.assertIn("Ran 6 test(s)", stdout_text)
         self.assertIn("OK", stdout_text)
 
     async def test_top_level_directory_resolves_relative_path(self) -> None:
@@ -1521,7 +1623,7 @@ class TestCLI(AsyncTestCase, concurrent=True):
             )
         stdout_text = result.stdout.decode()
         self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
-        self.assertIn("Ran 4 test(s)", stdout_text)
+        self.assertIn("Ran 6 test(s)", stdout_text)
         self.assertIn("OK", stdout_text)
 
     async def test_top_level_directory_with_class_selector(self) -> None:
@@ -1550,7 +1652,7 @@ class TestCLI(AsyncTestCase, concurrent=True):
             )
         stdout_text = result.stdout.decode()
         self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
-        self.assertIn("Ran 2 test(s)", stdout_text)
+        self.assertIn("Ran 3 test(s)", stdout_text)
         self.assertIn("OK", stdout_text)
 
     async def test_top_level_directory_with_method_selector(self) -> None:
@@ -1615,11 +1717,11 @@ class TestCLI(AsyncTestCase, concurrent=True):
             )
         stdout_text = result.stdout.decode()
         self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
-        self.assertIn("Ran 4 test(s)", stdout_text)
+        self.assertIn("Ran 6 test(s)", stdout_text)
         self.assertIn("OK", stdout_text)
 
-    async def test_top_level_directory_with_absolute_path(self) -> None:
-        """``-t`` does not interfere when positional paths are absolute."""
+    async def test_top_level_directory_rejects_absolute_outside(self) -> None:
+        """An absolute path outside ``-t`` is rejected."""
         sample_file = str(Path(__file__).parent / "_sample_discover" / "test_sample.py")
         top_dir = str(Path(__file__).resolve().parents[1])
 
@@ -1632,17 +1734,14 @@ class TestCLI(AsyncTestCase, concurrent=True):
                     "-t",
                     "/tmp/_barrage_no_such_dir_99999",
                     sample_file,
-                    "-v",
                 ],
                 stdout=PIPE,
                 stderr=PIPE,
                 cwd=top_dir,
                 check=False,
             )
-        stdout_text = result.stdout.decode()
-        self.assertEqual(result.returncode, 0, f"stdout:\n{stdout_text}\nstderr:\n{result.stderr.decode()}")
-        self.assertIn("Ran 4 test(s)", stdout_text)
-        self.assertIn("OK", stdout_text)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"not inside top-level directory", result.stderr)
 
 
 # ===================================================================== #
