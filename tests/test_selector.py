@@ -107,7 +107,7 @@ class TestPriSelector(AsyncTestCase, concurrent=True):
         """The running event loop uses PriSelector as its selector."""
         loop = asyncio.get_running_loop()
         self.assertIsInstance(
-            loop._selector,  # type: ignore[attr-defined]
+            loop._selector,  # type: ignore[attr-defined,ty:unresolved-attribute]
             PriSelector,
         )
 
