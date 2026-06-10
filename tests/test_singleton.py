@@ -207,7 +207,7 @@ class TestSingletonDescriptor(AsyncTestCase, concurrent=True):
             pass
 
         with self.assertRaises(TypeError) as ctx:
-            singleton(not_a_class)  # type: ignore[arg-type,type-var]
+            singleton(not_a_class)  # type: ignore[arg-type,type-var,ty:invalid-argument-type]
 
         self.assertIn("expects a class", str(ctx.exception))
 
@@ -218,7 +218,7 @@ class TestSingletonDescriptor(AsyncTestCase, concurrent=True):
             pass
 
         with self.assertRaises(TypeError) as ctx:
-            singleton(NotASingleton)  # type: ignore[type-var]
+            singleton(NotASingleton)  # type: ignore[type-var,ty:invalid-argument-type]
 
         self.assertIn("Singleton subclass", str(ctx.exception))
         self.assertIn("NotASingleton", str(ctx.exception))
@@ -385,7 +385,7 @@ class TestSingletonDiscovery(AsyncTestCase, concurrent=True):
 
         class _Inner(AsyncTestCase):
             __test__ = False
-            ctr: Counter = None  # type: ignore[assignment]
+            ctr: Counter = None  # type: ignore[assignment,ty:invalid-assignment]
 
         found = discover_singletons(_Inner)
         self.assertEqual(len(found), 0)
@@ -771,7 +771,7 @@ class TestSingletonDependencies(AsyncTestCase):
             b = singleton(_B)
 
         # Patch _B to create the cycle now that _A exists.
-        _B.a = singleton(_A)  # type: ignore[attr-defined]
+        _B.a = singleton(_A)  # type: ignore[attr-defined,ty:unresolved-attribute]
 
         class _Inner(AsyncTestCase):
             __test__ = False
@@ -802,7 +802,7 @@ class TestSingletonDependencies(AsyncTestCase):
             b = singleton(_B)
 
         # Patch _C to close the cycle now that _A exists.
-        _C.a = singleton(_A)  # type: ignore[attr-defined]
+        _C.a = singleton(_A)  # type: ignore[attr-defined,ty:unresolved-attribute]
 
         class _Inner(AsyncTestCase):
             __test__ = False

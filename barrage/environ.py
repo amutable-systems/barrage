@@ -76,7 +76,9 @@ class _EnvironContext:
         if cls._refcount == 1:
             original = os.environ
             cls._saved = original  # type: ignore[assignment]
-            os.environ = _ContextEnviron(original)  # type: ignore[assignment]  # noqa: B003
+            os.environ = (  # noqa: B003  # ty: ignore[invalid-assignment]
+                _ContextEnviron(original)  # type: ignore[assignment]
+            )
 
     def __exit__(self, *args: object) -> None:
         cls = type(self)
