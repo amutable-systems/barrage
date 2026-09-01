@@ -42,7 +42,7 @@ python3 -m barrage [options] [path ...]
 | `-v`, `--verbose` | Per-test output lines |
 | `-q`, `--quiet` | Summary only |
 | `-p`, `--pattern PATTERN` | File name glob for directory discovery (default: `test_*.py`) |
-| `--max-concurrency N` | Cap on concurrent test methods |
+| `--max-concurrency N` | Cap on concurrent test methods (default: `BARRAGE_MAX_CONCURRENCY` or unlimited) |
 | `-i`, `--interactive` | Run tests sequentially with no output capture and live per-test status. Useful for debugging. |
 | `--show-output` | Show captured stdout/stderr for all tests, including passing tests. |
 | `-x`, `--failfast` | Stop on the first test failure or error. |
@@ -239,6 +239,9 @@ class Child(Base, concurrent=True):
 ```console
 $ python3 -m barrage --max-concurrency 8 test/
 ```
+
+The limit can also be set through `BARRAGE_MAX_CONCURRENCY`. An explicit `--max-concurrency` value takes
+precedence over the environment variable.
 
 ### `MonitoredTestCase`
 

@@ -42,6 +42,7 @@ Usage::
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -75,9 +76,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-concurrency",
         type=int,
-        default=None,
+        default=os.environ.get("BARRAGE_MAX_CONCURRENCY"),
         metavar="N",
-        help="Maximum number of tests to run concurrently (default: unlimited)",
+        help=("Maximum number of tests to run concurrently (default: BARRAGE_MAX_CONCURRENCY or unlimited)"),
     )
     parser.add_argument(
         "-i",

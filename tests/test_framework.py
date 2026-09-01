@@ -20,12 +20,15 @@ Or run this file directly::
 import asyncio
 import contextlib
 import io
+import os
 import sys
 import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any, ClassVar
+from unittest import mock
 
+import barrage.__main__ as barrage_main
 from barrage.assertions import SkipTest
 from barrage.case import AsyncTestCase, MonitoredTestCase
 from barrage.discovery import discover, discover_module, resolve_tests
@@ -1457,6 +1460,40 @@ class TestNameBasedSelection(AsyncTestCase, concurrent=True):
 
 
 class TestCLI(AsyncTestCase, concurrent=True):
+    @staticmethod
+    def _run_main_with_max_concurrency(*args: str) -> tuple[int, list[int | None]]:
+        sample_file = Path(__file__).parent / "_sample_discover" / "test_sample.py"
+        observed: list[int | None] = []
+
+        class _Runner:
+            def __init__(self, *, max_concurrency: int | None, **kwargs: object) -> None:
+                observed.append(max_concurrency)
+                self.result = AsyncTestResult()
+                self.streamed_results = False
+
+            def run_suite(self, _suite: AsyncTestSuite) -> None:
+                pass
+
+        with (
+            mock.patch.object(barrage_main, "AsyncTestRunner", _Runner),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            returncode = barrage_main.main([*args, str(sample_file)])
+
+        return returncode, observed
+
+    async def test_max_concurrency_from_environment(self) -> None:
+        os.environ["BARRAGE_MAX_CONCURRENCY"] = "3"
+        returncode, observed = self._run_main_with_max_concurrency()
+        self.assertEqual(returncode, 0)
+        self.assertEqual(observed, [3])
+
+    async def test_max_concurrency_argument_overrides_environment(self) -> None:
+        os.environ["BARRAGE_MAX_CONCURRENCY"] = "3"
+        returncode, observed = self._run_main_with_max_concurrency("--max-concurrency", "5")
+        self.assertEqual(returncode, 0)
+        self.assertEqual(observed, [5])
+
     async def test_main_discover_sample_dir(self) -> None:
         sample_dir = str(Path(__file__).parent / "_sample_discover")
         top_dir = str(Path(__file__).resolve().parents[1])
